@@ -439,6 +439,8 @@ pub fn run() {
                 }
 
                 let Some(window) = app.get_webview_window("login-sync") else {
+                    // 登录窗口被用户关闭，通知前端结束等待
+                    let _ = app.emit("usage-sync-ended", ());
                     return;
                 };
 
@@ -453,6 +455,8 @@ pub fn run() {
 
                 thread::sleep(Duration::from_millis(1500));
             }
+            // 30 分钟超时，通知前端结束等待
+            let _ = app.emit("usage-sync-ended", ());
         });
     }
 

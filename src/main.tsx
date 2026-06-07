@@ -572,6 +572,16 @@ function SettingsPanel({
     };
   }, [refreshUsageAfterToken]);
 
+  React.useEffect(() => {
+    const unlistenPromise = listen("usage-sync-ended", () => {
+      setUsageSyncing(false);
+      setUsageStatus("登录窗口已关闭，Token 未获取到。可重新点击同步或使用方式二手动粘贴。");
+    });
+    return () => {
+      void unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, []);
+
   const pasteApiKey = React.useCallback(async () => {
     try {
       const text = await navigator.clipboard.readText();

@@ -7,6 +7,10 @@ pub fn run() {
         os::windows::fs::OpenOptionsExt,
         path::{Path, PathBuf},
         process::Command,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
         thread,
         time::Duration,
     };
@@ -361,6 +365,11 @@ pub fn run() {
         write_stored_config(&config)?;
         let app_config = to_app_config(config)?;
 
+        // 标记本次同步已成功，避免 watcher 在窗口关闭后误发"结束等待"事件
+        if let Some(flag) = app.try_state::<Arc<AtomicBool>>() {
+            flag.store(true, Ordering::SeqCst);
+        }
+
         if let Some(window) = app.get_webview_window("login-sync") {
             let _ = window.close();
         }
@@ -368,6 +377,29 @@ pub fn run() {
         let _ = app.emit("usage-token-captured", &app_config);
 
         Ok(app_config)
+    }
+
+    // 用 token 试调平台用量接口，验证它确实是有效的用量 token。
+    async fn verify_usage_token(token: &str, month: u32, year: u32) -> Result<(), String> {
+        let ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+                  (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
+        let url =
+            format!("https://platform.deepseek.com/api/v0/usage/amount?month={month}&year={year}");
+        let resp = reqwest::Client::new()
+            .get(&url)
+            .bearer_auth(token)
+            .header("x-app-version", "1.0.0")
+            .header("Accept", "*/*")
+            .header("User-Agent", ua)
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await
+            .map_err(|error| format!("验证 token 失败：{error}"))?;
+        if resp.status().as_u16() == 200 {
+            Ok(())
+        } else {
+            Err(format!("token 无效：HTTP {}", resp.status().as_u16()))
+        }
     }
 
     fn read_shared_text(path: &Path) -> Option<String> {
@@ -439,8 +471,14 @@ pub fn run() {
                 }
 
                 let Some(window) = app.get_webview_window("login-sync") else {
-                    // 登录窗口被用户关闭，通知前端结束等待
-                    let _ = app.emit("usage-sync-ended", ());
+                    // 窗口已关闭：若不是因成功捕获而关闭，才通知前端结束等待
+                    let captured = app
+                        .try_state::<Arc<AtomicBool>>()
+                        .map(|flag| flag.load(Ordering::SeqCst))
+                        .unwrap_or(false);
+                    if !captured {
+                        let _ = app.emit("usage-sync-ended", ());
+                    }
                     return;
                 };
 
@@ -455,60 +493,95 @@ pub fn run() {
 
                 thread::sleep(Duration::from_millis(1500));
             }
-            // 30 分钟超时，通知前端结束等待
-            let _ = app.emit("usage-sync-ended", ());
+            // 30 分钟超时，若仍未成功则通知前端结束等待
+            let captured = app
+                .try_state::<Arc<AtomicBool>>()
+                .map(|flag| flag.load(Ordering::SeqCst))
+                .unwrap_or(false);
+            if !captured {
+                let _ = app.emit("usage-sync-ended", ());
+            }
         });
     }
 
+    // 在登录窗口注入，hook fetch / XMLHttpRequest，主动从平台 API 请求的
+    // Authorization 头里抓 Bearer token。登录后页面自动调 API 即可即时捕获，
+    // 不再依赖 WebView2 磁盘缓存的延迟落盘。
     const USAGE_SYNC_POLL_JS: &str = r#"
     (function() {
-      if (window.__deepseek_sync_polling__) return;
-      window.__deepseek_sync_polling__ = true;
-      window.__deepseek_sync_token_sending__ = false;
-      var TITLE_PREFIX = 'DSM_USAGE_TOKEN:';
-      var POLL_MS = 1500;
-      var MAX_MS = 30 * 60 * 1000;
-      var elapsed = 0;
-      function extractToken(raw) {
-        if (!raw) return '';
-        try {
-          var obj = JSON.parse(raw);
-          if (obj && typeof obj.value === 'string') return obj.value;
-        } catch (e) {}
-        return typeof raw === 'string' ? raw : '';
+      if (window.__dsm_token_hook__) return;
+      window.__dsm_token_hook__ = true;
+      var done = false;
+      var pending = false;
+
+      function deliver(token) {
+        if (done || pending) return;
+        if (!token || typeof token !== 'string') return;
+        token = token.trim();
+        if (token.length < 20) return;
+        if (!(window.__TAURI__ && window.__TAURI__.core)) return;
+        var now = new Date();
+        pending = true;
+        window.__TAURI__.core.invoke('usage_token_captured', {
+          token: token,
+          month: now.getMonth() + 1,
+          year: now.getFullYear()
+        }).then(function() {
+          done = true;
+        }).catch(function() {
+          // 后端验证未通过（如登录中途的临时 token），继续等下一个请求
+          pending = false;
+        });
       }
-      function tryExtract() {
-        if (elapsed > MAX_MS) return;
-        elapsed += POLL_MS;
-        try {
-          var token = extractToken(localStorage.getItem('userToken'));
-          if (token && token.length > 0) {
-            document.title = TITLE_PREFIX + token;
-            try {
-              if (window.__deepseek_sync_token_sending__) {
-                setTimeout(tryExtract, POLL_MS);
-                return;
-              }
-              if (window.__TAURI__ && window.__TAURI__.core) {
-                window.__deepseek_sync_token_sending__ = true;
-                window.__TAURI__.core.invoke('usage_token_captured', { token: token })
-                  .catch(function() {
-                    window.__deepseek_sync_token_sending__ = false;
-                    setTimeout(tryExtract, POLL_MS);
-                  });
-                return;
-              }
-            } catch (e) {}
-          }
-        } catch (e) {}
-        setTimeout(tryExtract, POLL_MS);
+
+      function fromAuth(value) {
+        if (!value) return;
+        var m = /Bearer\s+(\S+)/i.exec(String(value));
+        if (m && m[1]) deliver(m[1]);
       }
-      setTimeout(tryExtract, 1500);
+
+      var origFetch = window.fetch;
+      if (typeof origFetch === 'function') {
+        window.fetch = function(input, init) {
+          try {
+            var headers = (init && init.headers) || (input && input.headers);
+            if (headers) {
+              if (typeof Headers !== 'undefined' && headers instanceof Headers) {
+                fromAuth(headers.get('authorization'));
+              } else if (Array.isArray(headers)) {
+                for (var i = 0; i < headers.length; i++) {
+                  if (headers[i] && String(headers[i][0]).toLowerCase() === 'authorization') {
+                    fromAuth(headers[i][1]);
+                  }
+                }
+              } else if (typeof headers === 'object') {
+                for (var k in headers) {
+                  if (k.toLowerCase() === 'authorization') fromAuth(headers[k]);
+                }
+              }
+            }
+          } catch (e) {}
+          return origFetch.apply(this, arguments);
+        };
+      }
+
+      var origSet = XMLHttpRequest.prototype.setRequestHeader;
+      XMLHttpRequest.prototype.setRequestHeader = function(name, value) {
+        try {
+          if (name && String(name).toLowerCase() === 'authorization') fromAuth(value);
+        } catch (e) {}
+        return origSet.apply(this, arguments);
+      };
     })();
     "#;
 
     #[tauri::command]
     async fn start_usage_sync(app: tauri::AppHandle) -> Result<(), String> {
+        // 重置本次同步的成功标志
+        if let Some(flag) = app.try_state::<Arc<AtomicBool>>() {
+            flag.store(false, Ordering::SeqCst);
+        }
+
         if let Some(token) = find_webview_cached_usage_token() {
             capture_usage_token(&app, token)?;
             return Ok(());
@@ -548,11 +621,20 @@ pub fn run() {
     }
 
     #[tauri::command]
-    fn usage_token_captured(
+    async fn usage_token_captured(
         app: tauri::AppHandle,
         token: String,
+        month: u32,
+        year: u32,
     ) -> Result<AppConfig, String> {
-        capture_usage_token(&app, token)
+        let value = token.trim().to_string();
+        if value.is_empty() {
+            return Err("用量 Token 为空".to_string());
+        }
+        // 先验证再保存：拦截到的 token 可能是登录中途的临时 token，
+        // 只有能真正调用用量接口的才接受
+        verify_usage_token(&value, month, year).await?;
+        capture_usage_token(&app, value)
     }
 
     #[derive(Debug, Serialize)]
@@ -787,6 +869,7 @@ pub fn run() {
     }
 
     tauri::Builder::default()
+        .manage(Arc::new(AtomicBool::new(false)))
         .invoke_handler(tauri::generate_handler![
             hide_main_window,
             get_app_config,

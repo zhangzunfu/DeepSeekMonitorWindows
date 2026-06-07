@@ -641,7 +641,7 @@ function SettingsPanel({
     setUsageStatus("已打开登录窗口，请在浏览器中登录 DeepSeek 账号…");
     void invoke("start_usage_sync")
       .then(() => {
-        setUsageStatus("登录窗口已打开，登录成功后将自动同步");
+        setUsageStatus("登录窗口已打开，完成登录后会自动获取，无需其它操作");
       })
       .catch((error) => {
         setUsageSyncing(false);

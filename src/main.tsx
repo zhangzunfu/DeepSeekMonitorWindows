@@ -638,14 +638,20 @@ function SettingsPanel({
 
   const startUsageSync = React.useCallback(() => {
     setUsageSyncing(true);
-    setUsageStatus("已打开登录窗口，请在浏览器中登录 DeepSeek 账号…");
-    void invoke("start_usage_sync")
-      .then(() => {
-        setUsageStatus("登录窗口已打开，完成登录后会自动获取，无需其它操作");
+    setUsageStatus("正在打开登录窗口…");
+    void invoke<boolean>("start_usage_sync")
+      .then((synced) => {
+        if (!synced) {
+          setUsageStatus("登录完成后，再次点击本按钮即可同步用量（可多点几次）");
+        }
+        // synced=true 时由 usage-token-captured 事件刷新数据并更新状态
       })
       .catch((error) => {
-        setUsageSyncing(false);
         setUsageStatus(typeof error === "string" ? error : "打开登录窗口失败");
+      })
+      .finally(() => {
+        // 短暂忙碌后自动恢复可点击，允许用户登录后反复点击触发同步
+        window.setTimeout(() => setUsageSyncing(false), 2500);
       });
   }, []);
 

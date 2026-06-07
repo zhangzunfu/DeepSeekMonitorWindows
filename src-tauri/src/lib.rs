@@ -335,25 +335,6 @@ pub fn run() {
     }
 
     const USAGE_TOKEN_TITLE_PREFIX: &str = "DSM_USAGE_TOKEN:";
-    const USAGE_SYNC_EXTRACT_JS: &str = r#"
-    (function() {
-      var TITLE_PREFIX = 'DSM_USAGE_TOKEN:';
-      function extractToken(raw) {
-        if (!raw) return '';
-        try {
-          var obj = JSON.parse(raw);
-          if (obj && typeof obj.value === 'string') return obj.value;
-        } catch (e) {}
-        return typeof raw === 'string' ? raw : '';
-      }
-      try {
-        var token = extractToken(localStorage.getItem('userToken'));
-        if (token && token.length > 0) {
-          document.title = TITLE_PREFIX + token;
-        }
-      } catch (e) {}
-    })();
-    "#;
 
     fn capture_usage_token(app: &tauri::AppHandle, token: String) -> Result<AppConfig, String> {
         let value = token.trim().to_string();
@@ -482,12 +463,25 @@ pub fn run() {
                     return;
                 };
 
-                let _ = window.eval(USAGE_SYNC_EXTRACT_JS);
-
                 if let Ok(title) = window.title() {
-                    if let Some(token) = title.strip_prefix(USAGE_TOKEN_TITLE_PREFIX) {
-                        let _ = capture_usage_token(&app, token.to_string());
-                        return;
+                    if let Some(rest) = title.strip_prefix(USAGE_TOKEN_TITLE_PREFIX) {
+                        // 注入脚本写入的格式：{year}:{month}:{token}
+                        let mut parts = rest.splitn(3, ':');
+                        if let (Some(y), Some(m), Some(tok)) =
+                            (parts.next(), parts.next(), parts.next())
+                        {
+                            if let (Ok(year), Ok(month)) = (y.parse::<u32>(), m.parse::<u32>()) {
+                                let token = tok.to_string();
+                                // 验证 token 真能调用用量接口，过滤登录中途的临时 token
+                                let verified = tauri::async_runtime::block_on(
+                                    verify_usage_token(&token, month, year),
+                                );
+                                if verified.is_ok() {
+                                    let _ = capture_usage_token(&app, token);
+                                    return;
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -515,23 +509,25 @@ pub fn run() {
       var pending = false;
 
       function deliver(token) {
-        if (done || pending) return;
+        if (done) return;
         if (!token || typeof token !== 'string') return;
         token = token.trim();
         if (token.length < 20) return;
-        if (!(window.__TAURI__ && window.__TAURI__.core)) return;
         var now = new Date();
-        pending = true;
-        window.__TAURI__.core.invoke('usage_token_captured', {
-          token: token,
-          month: now.getMonth() + 1,
-          year: now.getFullYear()
-        }).then(function() {
-          done = true;
-        }).catch(function() {
-          // 后端验证未通过（如登录中途的临时 token），继续等下一个请求
-          pending = false;
-        });
+        var y = now.getFullYear();
+        var m = now.getMonth() + 1;
+        // 主通道：写入 document.title，原生侧 window.title() 读取。
+        // 外部网站窗口默认不注入 __TAURI__，此通道不依赖它，最可靠。
+        try { document.title = 'DSM_USAGE_TOKEN:' + y + ':' + m + ':' + token; } catch (e) {}
+        // 辅通道：若本窗口恰好可用 __TAURI__，直接上报更快
+        try {
+          if (!pending && window.__TAURI__ && window.__TAURI__.core) {
+            pending = true;
+            window.__TAURI__.core.invoke('usage_token_captured', {
+              token: token, month: m, year: y
+            }).then(function() { done = true; }).catch(function() { pending = false; });
+          }
+        } catch (e) {}
       }
 
       function fromAuth(value) {
@@ -576,19 +572,25 @@ pub fn run() {
     "#;
 
     #[tauri::command]
-    async fn start_usage_sync(app: tauri::AppHandle) -> Result<(), String> {
+    async fn start_usage_sync(app: tauri::AppHandle) -> Result<bool, String> {
         // 重置本次同步的成功标志
         if let Some(flag) = app.try_state::<Arc<AtomicBool>>() {
             flag.store(false, Ordering::SeqCst);
         }
 
+        // 先扫一次缓存：登录完成后重复点击本命令，缓存落盘后即可命中
         if let Some(token) = find_webview_cached_usage_token() {
             capture_usage_token(&app, token)?;
-            return Ok(());
+            return Ok(true);
         }
 
-        if let Some(window) = app.get_webview_window("login-sync") {
-            let _ = window.close();
+        // 登录窗口已存在：刷新它，促使用量页重新请求接口、把响应写入缓存，
+        // 用户随后再点一次本按钮即可命中。不重复弹新窗口、不死等。
+        if app.get_webview_window("login-sync").is_some() {
+            if let Some(window) = app.get_webview_window("login-sync") {
+                let _ = window.eval("location.reload();");
+            }
+            return Ok(false);
         }
 
         let url = tauri::WebviewUrl::External("https://platform.deepseek.com".parse().unwrap());
@@ -611,13 +613,14 @@ pub fn run() {
                     .host_str()
                     .is_some_and(|host| host == "platform.deepseek.com")
             {
-                let _ = window.eval(USAGE_SYNC_EXTRACT_JS);
+                // 双保险：万一 initialization_script 未注入，页面加载完再装一次 hook
+                let _ = window.eval(USAGE_SYNC_POLL_JS);
             }
         })
         .build()
         .map_err(|error| format!("打开登录窗口失败：{error}"))?;
         start_usage_title_watcher(app);
-        Ok(())
+        Ok(false)
     }
 
     #[tauri::command]

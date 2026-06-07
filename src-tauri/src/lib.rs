@@ -430,6 +430,8 @@ pub fn run() {
 
     fn start_usage_title_watcher(app: tauri::AppHandle) {
         thread::spawn(move || {
+            // 登录页加载并触发平台 API 请求需要时间，等待后再开始扫缓存
+            thread::sleep(Duration::from_secs(3));
             for _ in 0..1200 {
                 if let Some(token) = find_webview_cached_usage_token() {
                     let _ = capture_usage_token(&app, token);

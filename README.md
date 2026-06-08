@@ -173,6 +173,9 @@ Rust 后端依赖：
 - 支持缓存命中、缓存未命中与输出 Token 的明细显示。
 - 增加亮色 UI 皮肤，支持在主面板一键切换并记住用户选择。
 - 设置页增加当前版本号显示。
+- 当前 GitHub Release `v1.1.0` 已标记为 Latest，安装包为 `DeepSeekMonitorWindows_1.1.0_x64-setup.exe`。
+- 安装包 SHA256：`B13EF28BB7E803D923E1A00BCE4A873B4EB7F2F592AFF690173C2E9291F1D13F`。
+- 历史 Release `v1.0.1` 和旧安装包继续保留，便于回退和版本追溯。
 
 ### v1.0.1
 

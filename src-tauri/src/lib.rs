@@ -695,12 +695,39 @@ pub fn run() {
                     return;
                 };
 
+                // Method 1: JS title-based capture (backup, works for non-httpOnly cookies)
                 if let Ok(title) = window.title() {
                     if let Some(rest) = title.strip_prefix(MIMO_COOKIE_TITLE_PREFIX) {
                         let cookie = rest.to_string();
                         if cookie.len() >= 20 {
                             let _ = capture_mimo_cookie(&app, cookie);
                             return;
+                        }
+                    }
+                }
+
+                // Method 2: Native WebView2 cookie API (primary, reads httpOnly cookies too)
+                // Only capture when we detect likely login state (sufficient cookie count + auth indicators)
+                if let Ok(url) = url::Url::parse("https://platform.xiaomimimo.com") {
+                    if let Ok(cookies) = window.cookies_for_url(url) {
+                        // Need at least a few cookies to indicate login
+                        // (pre-login pages typically only have 1-2 tracking cookies)
+                        if cookies.len() >= 3 {
+                            let cookie_str: String = cookies
+                                .iter()
+                                .map(|c| format!("{}={}", c.name(), c.value()))
+                                .collect::<Vec<_>>()
+                                .join("; ");
+                            // Require substantial length to avoid capturing trivial pre-login cookies
+                            if cookie_str.len() >= 50 {
+                                log::info!(
+                                    "MIMO native cookie capture: {} cookies, {} bytes",
+                                    cookies.len(),
+                                    cookie_str.len()
+                                );
+                                let _ = capture_mimo_cookie(&app, cookie_str);
+                                return;
+                            }
                         }
                     }
                 }

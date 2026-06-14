@@ -385,6 +385,14 @@ function App() {
             setUsageState("nokey");
             setUsageError("未配置用量 Token");
           }}
+          onMimoDataLoaded={(balance, plan) => {
+            setMimoBalance(balance);
+            setMimoBalanceState("ok");
+            setMimoBalanceError("");
+            setMimoPlan(plan);
+            setMimoPlanState("ok");
+            setMimoPlanError("");
+          }}
           onRefreshIntervalChanged={setRefreshIntervalSeconds}
           onAutoRefreshChanged={setAutoRefreshEnabled}
           onBack={() => setView("dashboard")}
@@ -1005,6 +1013,7 @@ function SettingsPanel({
   onBack,
   onUsageLoaded,
   onUsageCleared,
+  onMimoDataLoaded,
   onRefreshIntervalChanged,
   onAutoRefreshChanged,
 }: {
@@ -1013,6 +1022,7 @@ function SettingsPanel({
   onBack: () => void;
   onUsageLoaded: (usage: UsageResult) => void;
   onUsageCleared: () => void;
+  onMimoDataLoaded: (balance: MimoBalanceData, plan: MimoPlanItem[]) => void;
   onRefreshIntervalChanged: (seconds: number) => void;
   onAutoRefreshChanged: (enabled: boolean) => void;
 }) {
@@ -1027,7 +1037,7 @@ function SettingsPanel({
   const [usageStatus, setUsageStatus] = React.useState("");
   const [usageSyncing, setUsageSyncing] = React.useState(false);
   const [showManualPaste, setShowManualPaste] = React.useState(false);
-  const [appVersion, setAppVersion] = React.useState("1.1.0");
+  const [appVersion, setAppVersion] = React.useState("1.2.1");
 
   // MIMO cookie states
   const [mimoCookie, setMimoCookie] = React.useState("");
@@ -1057,7 +1067,7 @@ function SettingsPanel({
   React.useEffect(() => {
     void getVersion()
       .then(setAppVersion)
-      .catch(() => setAppVersion("1.1.0"));
+      .catch(() => setAppVersion("1.2.1"));
   }, []);
 
   const refreshUsageAfterToken = React.useCallback(
@@ -1104,7 +1114,41 @@ function SettingsPanel({
     const unlistenPromise = listen<AppConfig>("mimo-cookie-captured", (event) => {
       setConfig(event.payload);
       setMimoCookieSyncing(false);
-      setMimoCookieStatus("已通过网页登录自动同步 MIMO Cookie");
+      setMimoCookieStatus("已通过网页登录自动同步 MIMO Cookie，正在刷新数据…");
+      // Auto-refresh MIMO data after cookie is captured
+      if (currentProvider === "mimo") {
+        Promise.all([
+          invoke<MimoBalanceData>("fetch_mimo_balance"),
+          invoke<UsageResult>("fetch_mimo_usage"),
+        ])
+          .then(([balanceData, usageData]) => {
+            const planItems: MimoPlanItem[] = usageData.models.map((m) => ({
+              name: m.key,
+              planName: m.name,
+              used: m.totalTokens,
+              total: m.cacheHitTokens,
+              remaining: Math.max(0, m.cacheHitTokens - m.totalTokens),
+              unit: "tokens",
+            }));
+            onMimoDataLoaded(balanceData, planItems);
+            setMimoCookieStatus("已通过网页登录自动同步 MIMO Cookie");
+          })
+          .catch((error) => {
+            const message = typeof error === "string" ? error : "刷新失败";
+            setMimoCookieStatus(`Cookie 已保存，但数据刷新失败：${message}`);
+          });
+      }
+    });
+    return () => {
+      void unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, [currentProvider, onMimoDataLoaded]);
+
+  // Listen for MIMO sync ended (user closed login window without success)
+  React.useEffect(() => {
+    const unlistenPromise = listen("mimo-sync-ended", () => {
+      setMimoCookieSyncing(false);
+      setMimoCookieStatus("登录窗口已关闭，Cookie 未获取到。可重新点击同步或使用方式二手动粘贴。");
     });
     return () => {
       void unlistenPromise.then((unlisten) => unlisten());

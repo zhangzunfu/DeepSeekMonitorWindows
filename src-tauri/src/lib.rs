@@ -357,8 +357,18 @@ pub fn run() {
         data: MimoBalanceInfo,
     }
 
+    #[derive(Debug, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct MimoBalanceResult {
+        currency: String,
+        total_balance: String,
+        cash_balance: String,
+        gift_balance: String,
+        frozen_balance: String,
+    }
+
     #[tauri::command]
-    async fn fetch_mimo_balance() -> Result<BalanceResult, String> {
+    async fn fetch_mimo_balance() -> Result<MimoBalanceResult, String> {
         let config = read_stored_config()?;
         let cookie = config
             .mimo_cookie
@@ -388,13 +398,16 @@ pub fn run() {
             .map_err(|error| format!("解析余额数据失败：{error}"))?;
 
         let is_available = data.code == 0;
+        if !is_available {
+            return Err("MIMO 余额接口返回错误".to_string());
+        }
 
-        Ok(BalanceResult {
-            is_available,
+        Ok(MimoBalanceResult {
             currency: data.data.currency,
             total_balance: format!("{:.2}", data.data.balance),
-            granted_balance: "0.00".to_string(),
-            topped_up_balance: "0.00".to_string(),
+            cash_balance: format!("{:.2}", data.data.cash_balance),
+            gift_balance: format!("{:.2}", data.data.gift_balance),
+            frozen_balance: format!("{:.2}", data.data.frozen_balance),
         })
     }
 
@@ -593,11 +606,12 @@ pub fn run() {
         } catch (e) {}
       }
 
-      function fromCookie(value) {
+      function fromHeader(value) {
         if (!value) return;
         deliver(String(value));
       }
 
+      // Method 1: Hook fetch to intercept explicit Cookie headers
       var origFetch = window.fetch;
       if (typeof origFetch === 'function') {
         window.fetch = function(input, init) {
@@ -605,16 +619,16 @@ pub fn run() {
             var headers = (init && init.headers) || (input && input.headers);
             if (headers) {
               if (typeof Headers !== 'undefined' && headers instanceof Headers) {
-                fromCookie(headers.get('cookie'));
+                fromHeader(headers.get('cookie'));
               } else if (Array.isArray(headers)) {
                 for (var i = 0; i < headers.length; i++) {
                   if (headers[i] && String(headers[i][0]).toLowerCase() === 'cookie') {
-                    fromCookie(headers[i][1]);
+                    fromHeader(headers[i][1]);
                   }
                 }
               } else if (typeof headers === 'object') {
                 for (var k in headers) {
-                  if (k.toLowerCase() === 'cookie') fromCookie(headers[k]);
+                  if (k.toLowerCase() === 'cookie') fromHeader(headers[k]);
                 }
               }
             }
@@ -623,13 +637,46 @@ pub fn run() {
         };
       }
 
+      // Method 2: Hook XMLHttpRequest to intercept explicit Cookie headers
       var origSet = XMLHttpRequest.prototype.setRequestHeader;
       XMLHttpRequest.prototype.setRequestHeader = function(name, value) {
         try {
-          if (name && String(name).toLowerCase() === 'cookie') fromCookie(value);
+          if (name && String(name).toLowerCase() === 'cookie') fromHeader(value);
         } catch (e) {}
         return origSet.apply(this, arguments);
       };
+
+      // Method 3: Poll document.cookie for cookies set by the server via Set-Cookie
+      // Browsers automatically manage these cookies and don't expose them in fetch/XHR headers.
+      // document.cookie returns all non-httpOnly cookies accessible to JavaScript.
+      function pollDocumentCookie() {
+        if (done) return;
+        try {
+          var cookie = document.cookie;
+          if (cookie && cookie.length >= 20) {
+            deliver(cookie);
+          }
+        } catch (e) {}
+      }
+
+      // Poll every 2 seconds for up to 5 minutes
+      var pollCount = 0;
+      var maxPolls = 150;
+      var pollTimer = setInterval(function() {
+        pollCount++;
+        if (done || pollCount > maxPolls) {
+          clearInterval(pollTimer);
+          return;
+        }
+        pollDocumentCookie();
+      }, 2000);
+
+      // Also poll immediately and on common login-completion signals
+      pollDocumentCookie();
+      window.addEventListener('focus', pollDocumentCookie);
+      document.addEventListener('visibilitychange', function() {
+        if (!document.hidden) pollDocumentCookie();
+      });
     })();
     "#;
 
@@ -1364,7 +1411,7 @@ pub fn run() {
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
-                    // 仅在左键"抬起"时切换；否则按下+抬起各触发一次，窗口会闪现后立即隐藏
+                    // 仅在左键"抬起"时候切换；否则按下+抬起各触发一次，窗口会闪现后立即隐藏
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,

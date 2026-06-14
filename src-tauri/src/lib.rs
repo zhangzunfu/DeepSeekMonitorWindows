@@ -30,6 +30,10 @@ pub fn run() {
         #[serde(default)]
         auto_refresh_enabled: bool,
         autostart: bool,
+        #[serde(default)]
+        current_provider: Option<String>,
+        #[serde(default)]
+        mimo_cookie: Option<String>,
     }
 
     #[derive(Debug, Serialize)]
@@ -42,6 +46,8 @@ pub fn run() {
         auto_refresh_enabled: bool,
         autostart: bool,
         config_path: String,
+        current_provider: String,
+        mimo_cookie_configured: bool,
     }
 
     fn config_path() -> Result<PathBuf, String> {
@@ -117,6 +123,17 @@ pub fn run() {
             .map(|value| !value.is_empty())
             .unwrap_or(false);
 
+        let current_provider = config
+            .current_provider
+            .clone()
+            .unwrap_or_else(|| "deepseek".to_string());
+
+        let mimo_cookie_configured = !config
+            .mimo_cookie
+            .as_ref()
+            .map(|value| value.is_empty())
+            .unwrap_or(true);
+
         Ok(AppConfig {
             api_key_configured: api_key_preview.is_some(),
             api_key_preview,
@@ -125,6 +142,8 @@ pub fn run() {
             auto_refresh_enabled: config.auto_refresh_enabled,
             autostart: config.autostart,
             config_path: path.to_string_lossy().to_string(),
+            current_provider,
+            mimo_cookie_configured,
         })
     }
 
@@ -313,6 +332,392 @@ pub fn run() {
             topped_up_balance: info.topped_up_balance,
         })
     }
+
+    // ==================== MIMO Balance ====================
+
+    #[derive(Deserialize)]
+    struct MimoBalanceInfo {
+        balance: f64,
+        #[serde(rename = "cashBalance")]
+        cash_balance: f64,
+        #[serde(rename = "giftBalance")]
+        gift_balance: f64,
+        #[serde(rename = "frozenBalance")]
+        frozen_balance: f64,
+        #[serde(rename = "overdraftLimit")]
+        overdraft_limit: f64,
+        #[serde(rename = "remainingOverdraftLimit")]
+        remaining_overdraft_limit: f64,
+        currency: String,
+    }
+
+    #[derive(Deserialize)]
+    struct MimoBalanceResp {
+        code: i32,
+        data: MimoBalanceInfo,
+    }
+
+    #[tauri::command]
+    async fn fetch_mimo_balance() -> Result<BalanceResult, String> {
+        let config = read_stored_config()?;
+        let cookie = config
+            .mimo_cookie
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "未配置 MIMO Cookie".to_string())?;
+
+        let client = reqwest::Client::new();
+        let response = client
+            .get("https://platform.xiaomimimo.com/api/v1/balance")
+            .header("Cookie", &cookie)
+            .timeout(std::time::Duration::from_secs(15))
+            .send()
+            .await
+            .map_err(|error| format!("网络请求失败：{error}"))?;
+
+        match response.status().as_u16() {
+            200 => {}
+            401 => return Err("MIMO Cookie 无效或已过期".to_string()),
+            429 => return Err("请求过于频繁，请稍后再试".to_string()),
+            code if code >= 500 => return Err(format!("MIMO 服务器错误：{code}")),
+            code => return Err(format!("请求失败：HTTP {code}")),
+        }
+
+        let data: MimoBalanceResp = response
+            .json()
+            .await
+            .map_err(|error| format!("解析余额数据失败：{error}"))?;
+
+        let is_available = data.code == 0;
+
+        Ok(BalanceResult {
+            is_available,
+            currency: data.data.currency,
+            total_balance: format!("{:.2}", data.data.balance),
+            granted_balance: "0.00".to_string(),
+            topped_up_balance: "0.00".to_string(),
+        })
+    }
+
+    // ==================== MIMO Usage ====================
+
+    #[derive(Deserialize)]
+    struct MimoUsageItem {
+        name: String,
+        used: f64,
+        limit: f64,
+    }
+
+    #[derive(Deserialize)]
+    struct MimoUsageContainer {
+        items: Vec<MimoUsageItem>,
+    }
+
+    #[derive(Deserialize)]
+    struct MimoUsageData {
+        usage: MimoUsageContainer,
+    }
+
+    #[derive(Deserialize)]
+    struct MimoUsageResp {
+        code: i32,
+        data: MimoUsageData,
+    }
+
+    #[tauri::command]
+    async fn fetch_mimo_usage() -> Result<UsageResult, String> {
+        let config = read_stored_config()?;
+        let cookie = config
+            .mimo_cookie
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "未配置 MIMO Cookie".to_string())?;
+
+        let client = reqwest::Client::new();
+        let response = client
+            .get("https://platform.xiaomimimo.com/api/v1/tokenPlan/usage")
+            .header("Cookie", &cookie)
+            .timeout(std::time::Duration::from_secs(15))
+            .send()
+            .await
+            .map_err(|error| format!("网络请求失败：{error}"))?;
+
+        match response.status().as_u16() {
+            200 => {}
+            401 => return Err("MIMO Cookie 无效或已过期".to_string()),
+            429 => return Err("请求过于频繁，请稍后再试".to_string()),
+            code if code >= 500 => return Err(format!("MIMO 服务器错误：{code}")),
+            code => return Err(format!("请求失败：HTTP {code}")),
+        }
+
+        let data: MimoUsageResp = response
+            .json()
+            .await
+            .map_err(|error| format!("解析用量数据失败：{error}"))?;
+
+        if data.code != 0 {
+            return Err("MIMO 用量接口返回错误".to_string());
+        }
+
+        let mut plan_used = 0u64;
+        let mut plan_limit = 0u64;
+        let mut comp_used = 0u64;
+        let mut comp_limit = 0u64;
+
+        for item in &data.data.usage.items {
+            let used = (item.used * 100_000_000.0).round() as u64;
+            let limit = (item.limit * 100_000_000.0).round() as u64;
+            match item.name.as_str() {
+                "plan_total_token" => {
+                    plan_used = used;
+                    plan_limit = limit;
+                }
+                "compensation_total_token" => {
+                    comp_used = used;
+                    comp_limit = limit;
+                }
+                _ => {}
+            }
+        }
+
+        let models = vec![
+            UsageModelSummary {
+                key: "plan".to_string(),
+                name: "套餐积分".to_string(),
+                total_tokens: plan_used,
+                request_count: 0,
+                cache_hit_tokens: plan_limit,  // HACK: use cache_hit_tokens to carry limit
+                cache_miss_tokens: 0,
+                response_tokens: 0,
+                cost: 0.0,
+            },
+            UsageModelSummary {
+                key: "compensation".to_string(),
+                name: "补偿积分".to_string(),
+                total_tokens: comp_used,
+                request_count: 0,
+                cache_hit_tokens: comp_limit,  // HACK: use cache_hit_tokens to carry limit
+                cache_miss_tokens: 0,
+                response_tokens: 0,
+                cost: 0.0,
+            },
+        ];
+
+        Ok(UsageResult {
+            models,
+            days: Vec::new(),
+            month_cost: 0.0,
+        })
+    }
+
+    // ==================== MIMO Cookie Management ====================
+
+    #[tauri::command]
+    fn save_mimo_cookie(mimo_cookie: String) -> Result<AppConfig, String> {
+        let value = mimo_cookie.trim().to_string();
+        if value.is_empty() {
+            return Err("MIMO Cookie 不能为空".to_string());
+        }
+        let mut config = read_stored_config()?;
+        config.mimo_cookie = Some(value);
+        write_stored_config(&config)?;
+        to_app_config(config)
+    }
+
+    #[tauri::command]
+    fn clear_mimo_cookie() -> Result<AppConfig, String> {
+        let mut config = read_stored_config()?;
+        config.mimo_cookie = None;
+        write_stored_config(&config)?;
+        to_app_config(config)
+    }
+
+    // ==================== Provider Switching ====================
+
+    #[tauri::command]
+    fn save_current_provider(current_provider: String) -> Result<AppConfig, String> {
+        let value = current_provider.trim().to_string();
+        if value.is_empty() {
+            return Err("Provider 不能为空".to_string());
+        }
+        let mut config = read_stored_config()?;
+        config.current_provider = Some(value);
+        write_stored_config(&config)?;
+        to_app_config(config)
+    }
+
+    // ==================== MIMO Cookie Sync ====================
+
+    const MIMO_COOKIE_TITLE_PREFIX: &str = "DSM_MIMO_COOKIE:";
+
+    fn capture_mimo_cookie(app: &tauri::AppHandle, cookie: String) -> Result<AppConfig, String> {
+        let value = cookie.trim().to_string();
+        if value.is_empty() || value.len() < 20 {
+            return Err("MIMO Cookie 为空或无效".to_string());
+        }
+        let mut config = read_stored_config()?;
+        config.mimo_cookie = Some(value);
+        write_stored_config(&config)?;
+        let app_config = to_app_config(config)?;
+
+        if let Some(flag) = app.try_state::<Arc<AtomicBool>>() {
+            flag.store(true, Ordering::SeqCst);
+        }
+
+        if let Some(window) = app.get_webview_window("mimo-sync") {
+            let _ = window.close();
+        }
+
+        let _ = app.emit("mimo-cookie-captured", &app_config);
+
+        Ok(app_config)
+    }
+
+    const MIMO_SYNC_POLL_JS: &str = r#"
+    (function() {
+      if (window.__dsm_mimo_hook__) return;
+      window.__dsm_mimo_hook__ = true;
+      var done = false;
+      var pending = false;
+
+      function deliver(cookieStr) {
+        if (done) return;
+        if (!cookieStr || typeof cookieStr !== 'string') return;
+        cookieStr = cookieStr.trim();
+        if (cookieStr.length < 20) return;
+        try { document.title = 'DSM_MIMO_COOKIE:' + cookieStr; } catch (e) {}
+        try {
+          if (!pending && window.__TAURI__ && window.__TAURI__.core) {
+            pending = true;
+            window.__TAURI__.core.invoke('mimo_cookie_captured', { cookie: cookieStr })
+              .then(function() { done = true; }).catch(function() { pending = false; });
+          }
+        } catch (e) {}
+      }
+
+      function fromCookie(value) {
+        if (!value) return;
+        deliver(String(value));
+      }
+
+      var origFetch = window.fetch;
+      if (typeof origFetch === 'function') {
+        window.fetch = function(input, init) {
+          try {
+            var headers = (init && init.headers) || (input && input.headers);
+            if (headers) {
+              if (typeof Headers !== 'undefined' && headers instanceof Headers) {
+                fromCookie(headers.get('cookie'));
+              } else if (Array.isArray(headers)) {
+                for (var i = 0; i < headers.length; i++) {
+                  if (headers[i] && String(headers[i][0]).toLowerCase() === 'cookie') {
+                    fromCookie(headers[i][1]);
+                  }
+                }
+              } else if (typeof headers === 'object') {
+                for (var k in headers) {
+                  if (k.toLowerCase() === 'cookie') fromCookie(headers[k]);
+                }
+              }
+            }
+          } catch (e) {}
+          return origFetch.apply(this, arguments);
+        };
+      }
+
+      var origSet = XMLHttpRequest.prototype.setRequestHeader;
+      XMLHttpRequest.prototype.setRequestHeader = function(name, value) {
+        try {
+          if (name && String(name).toLowerCase() === 'cookie') fromCookie(value);
+        } catch (e) {}
+        return origSet.apply(this, arguments);
+      };
+    })();
+    "#;
+
+    fn start_mimo_title_watcher(app: tauri::AppHandle) {
+        thread::spawn(move || {
+            thread::sleep(Duration::from_secs(3));
+            for _ in 0..1200 {
+                let Some(window) = app.get_webview_window("mimo-sync") else {
+                    let captured = app
+                        .try_state::<Arc<AtomicBool>>()
+                        .map(|flag| flag.load(Ordering::SeqCst))
+                        .unwrap_or(false);
+                    if !captured {
+                        let _ = app.emit("mimo-sync-ended", ());
+                    }
+                    return;
+                };
+
+                if let Ok(title) = window.title() {
+                    if let Some(rest) = title.strip_prefix(MIMO_COOKIE_TITLE_PREFIX) {
+                        let cookie = rest.to_string();
+                        if cookie.len() >= 20 {
+                            let _ = capture_mimo_cookie(&app, cookie);
+                            return;
+                        }
+                    }
+                }
+
+                thread::sleep(Duration::from_millis(1500));
+            }
+            let captured = app
+                .try_state::<Arc<AtomicBool>>()
+                .map(|flag| flag.load(Ordering::SeqCst))
+                .unwrap_or(false);
+            if !captured {
+                let _ = app.emit("mimo-sync-ended", ());
+            }
+        });
+    }
+
+    #[tauri::command]
+    async fn start_mimo_sync(app: tauri::AppHandle) -> Result<bool, String> {
+        if let Some(flag) = app.try_state::<Arc<AtomicBool>>() {
+            flag.store(false, Ordering::SeqCst);
+        }
+
+        if app.get_webview_window("mimo-sync").is_some() {
+            if let Some(window) = app.get_webview_window("mimo-sync") {
+                let _ = window.eval("location.reload();");
+            }
+            return Ok(false);
+        }
+
+        let url =
+            tauri::WebviewUrl::External("https://platform.xiaomimimo.com".parse().unwrap());
+        tauri::WebviewWindowBuilder::new(&app, "mimo-sync", url)
+            .title("小米 MIMO 账号登录")
+            .inner_size(480.0, 720.0)
+            .min_inner_size(360.0, 480.0)
+            .resizable(true)
+            .center()
+            .visible(true)
+            .initialization_script(MIMO_SYNC_POLL_JS)
+            .on_page_load(|window, payload| {
+                if matches!(payload.event(), PageLoadEvent::Finished)
+                    && payload
+                        .url()
+                        .host_str()
+                        .is_some_and(|host| host == "platform.xiaomimimo.com")
+                {
+                    let _ = window.eval(MIMO_SYNC_POLL_JS);
+                }
+            })
+            .build()
+            .map_err(|error| format!("打开 MIMO 登录窗口失败：{error}"))?;
+        start_mimo_title_watcher(app);
+        Ok(false)
+    }
+
+    #[tauri::command]
+    async fn mimo_cookie_captured(
+        app: tauri::AppHandle,
+        cookie: String,
+    ) -> Result<AppConfig, String> {
+        capture_mimo_cookie(&app, cookie)
+    }
+
+    // ==================== DeepSeek Usage Token ====================
 
     #[tauri::command]
     fn save_usage_token(usage_token: String) -> Result<AppConfig, String> {
@@ -922,7 +1327,14 @@ pub fn run() {
             clear_usage_token,
             fetch_usage,
             start_usage_sync,
-            usage_token_captured
+            usage_token_captured,
+            fetch_mimo_balance,
+            fetch_mimo_usage,
+            save_mimo_cookie,
+            clear_mimo_cookie,
+            save_current_provider,
+            start_mimo_sync,
+            mimo_cookie_captured
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -952,7 +1364,7 @@ pub fn run() {
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
-                    // 仅在左键“抬起”时切换；否则按下+抬起各触发一次，窗口会闪现后立即隐藏
+                    // 仅在左键"抬起"时切换；否则按下+抬起各触发一次，窗口会闪现后立即隐藏
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,

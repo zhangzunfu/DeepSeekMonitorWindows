@@ -14,7 +14,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "DeepSeek Monitor Windows",
+        "title": "AI 用量监控",
         "width": 356,
         "height": 600,
         "resizable": false,

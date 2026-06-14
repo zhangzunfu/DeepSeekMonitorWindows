@@ -19,11 +19,14 @@ import {
   SunMedium,
   X,
   Zap,
+  ArrowLeftRight,
 } from "lucide-react";
 import "./styles.css";
 
 type ViewName = "dashboard" | "settings" | "detail";
-type ModelName = "flash" | "pro";
+type ModelName = "flash" | "pro" | "plan" | "compensation";
+type ProviderName = "deepseek" | "mimo";
+
 type AppConfig = {
   apiKeyConfigured: boolean;
   apiKeyPreview: string | null;
@@ -32,7 +35,10 @@ type AppConfig = {
   autoRefreshEnabled: boolean;
   autostart: boolean;
   configPath: string;
+  currentProvider: ProviderName;
+  mimoCookieConfigured: boolean;
 };
+
 type BalanceData = {
   isAvailable: boolean;
   currency: string;
@@ -69,6 +75,22 @@ type UsageResult = {
   models: UsageModel[];
   days: UsageDay[];
   monthCost: number;
+};
+
+type MimoBalanceData = {
+  currency: string;
+  totalBalance: string;
+  cashBalance: string;
+  giftBalance: string;
+  frozenBalance: string;
+};
+type MimoPlanItem = {
+  name: string;
+  planName: string;
+  used: number;
+  total: number;
+  remaining: number;
+  unit: string;
 };
 
 const fmtInt = (n: number) => Math.round(n).toLocaleString("en-US");
@@ -153,6 +175,10 @@ function App() {
   const [view, setView] = React.useState<ViewName>("dashboard");
   const [model, setModel] = React.useState<ModelName>("flash");
 
+  // Provider state
+  const [currentProvider, setCurrentProvider] = React.useState<ProviderName>("deepseek");
+
+  // DeepSeek states
   const [balance, setBalance] = React.useState<BalanceData | null>(null);
   const [balanceState, setBalanceState] = React.useState<BalanceState>("loading");
   const [balanceError, setBalanceError] = React.useState("");
@@ -160,9 +186,20 @@ function App() {
   const [usage, setUsage] = React.useState<UsageResult | null>(null);
   const [usageState, setUsageState] = React.useState<BalanceState>("loading");
   const [usageError, setUsageError] = React.useState("");
+
+  // MIMO states
+  const [mimoBalance, setMimoBalance] = React.useState<MimoBalanceData | null>(null);
+  const [mimoBalanceState, setMimoBalanceState] = React.useState<BalanceState>("loading");
+  const [mimoBalanceError, setMimoBalanceError] = React.useState("");
+
+  const [mimoPlan, setMimoPlan] = React.useState<MimoPlanItem[] | null>(null);
+  const [mimoPlanState, setMimoPlanState] = React.useState<BalanceState>("loading");
+  const [mimoPlanError, setMimoPlanError] = React.useState("");
+
   const [refreshIntervalSeconds, setRefreshIntervalSeconds] = React.useState(60);
   const [autoRefreshEnabled, setAutoRefreshEnabled] = React.useState(false);
 
+  // DeepSeek loaders
   const loadBalance = React.useCallback(() => {
     setBalanceState("loading");
     void invoke<BalanceData>("fetch_balance")
@@ -193,26 +230,105 @@ function App() {
       });
   }, []);
 
+  // MIMO loaders
+  const loadMimoBalance = React.useCallback(() => {
+    setMimoBalanceState("loading");
+    void invoke<MimoBalanceData>("fetch_mimo_balance")
+      .then((data) => {
+        setMimoBalance(data);
+        setMimoBalanceState("ok");
+      })
+      .catch((error) => {
+        const message = typeof error === "string" ? error : "查询失败";
+        setMimoBalanceError(message);
+        setMimoBalanceState(message.includes("未配置") ? "nokey" : "error");
+      });
+  }, []);
+
+  const loadMimoUsage = React.useCallback(() => {
+    setMimoPlanState("loading");
+    void invoke<UsageResult>("fetch_mimo_usage")
+      .then((data) => {
+        const planItems: MimoPlanItem[] = data.models.map((m) => ({
+          name: m.key,
+          planName: m.name,
+          used: m.totalTokens,
+          total: m.cacheHitTokens, // limit is carried in cacheHitTokens
+          remaining: Math.max(0, m.cacheHitTokens - m.totalTokens),
+          unit: "tokens",
+        }));
+        setMimoPlan(planItems);
+        setMimoPlanState("ok");
+        setMimoPlanError("");
+      })
+      .catch((error) => {
+        const message = typeof error === "string" ? error : "查询失败";
+        setMimoPlanError(message);
+        setMimoPlan(null);
+        setMimoPlanState(message.includes("未配置") ? "nokey" : "error");
+      });
+  }, []);
+
   const refreshAll = React.useCallback(() => {
-    loadBalance();
-    loadUsage();
-  }, [loadBalance, loadUsage]);
+    if (currentProvider === "deepseek") {
+      loadBalance();
+      loadUsage();
+    } else {
+      loadMimoBalance();
+      loadMimoUsage();
+    }
+  }, [currentProvider, loadBalance, loadUsage, loadMimoBalance, loadMimoUsage]);
 
-  React.useEffect(() => {
-    refreshAll();
-  }, [refreshAll]);
-
+  // Load provider from config on init
   React.useEffect(() => {
     void invoke<AppConfig>("get_app_config")
       .then((config) => {
         setRefreshIntervalSeconds(config.refreshIntervalSeconds || 60);
         setAutoRefreshEnabled(config.autoRefreshEnabled);
+        if (config.currentProvider) {
+          setCurrentProvider(config.currentProvider);
+        }
       })
       .catch(() => {
         setRefreshIntervalSeconds(60);
         setAutoRefreshEnabled(false);
       });
   }, []);
+
+  // Provider change handler - reset and reload
+  const handleProviderChange = React.useCallback(
+    (nextProvider: ProviderName) => {
+      if (nextProvider === currentProvider) return;
+      setCurrentProvider(nextProvider);
+      // Reset all states
+      setBalance(null);
+      setBalanceState("loading");
+      setBalanceError("");
+      setUsage(null);
+      setUsageState("loading");
+      setUsageError("");
+      setMimoBalance(null);
+      setMimoBalanceState("loading");
+      setMimoBalanceError("");
+      setMimoPlan(null);
+      setMimoPlanState("loading");
+      setMimoPlanError("");
+      // Save preference
+      void invoke("save_current_provider", { currentProvider: nextProvider }).catch(() => {});
+    },
+    [currentProvider],
+  );
+
+  // Trigger data loading when provider changes
+  React.useEffect(() => {
+    if (currentProvider === "deepseek") {
+      loadBalance();
+      loadUsage();
+    } else {
+      loadMimoBalance();
+      loadMimoUsage();
+    }
+  }, [currentProvider, loadBalance, loadUsage, loadMimoBalance, loadMimoUsage]);
 
   React.useEffect(() => {
     if (!autoRefreshEnabled) {
@@ -232,12 +348,19 @@ function App() {
     <div className="stage">
       {view === "dashboard" && (
         <DashboardPanel
+          currentProvider={currentProvider}
           balance={balance}
           balanceState={balanceState}
           balanceError={balanceError}
           usage={usage}
           usageState={usageState}
           usageError={usageError}
+          mimoBalance={mimoBalance}
+          mimoBalanceState={mimoBalanceState}
+          mimoBalanceError={mimoBalanceError}
+          mimoPlan={mimoPlan}
+          mimoPlanState={mimoPlanState}
+          mimoPlanError={mimoPlanError}
           onRefresh={refreshAll}
           onClose={hideWindow}
           onSettings={() => setView("settings")}
@@ -245,10 +368,13 @@ function App() {
             setModel(nextModel);
             setView("detail");
           }}
+          onProviderChange={handleProviderChange}
         />
       )}
       {view === "settings" && (
         <SettingsPanel
+          currentProvider={currentProvider}
+          onProviderChange={handleProviderChange}
           onUsageLoaded={(nextUsage) => {
             setUsage(nextUsage);
             setUsageState("ok");
@@ -265,7 +391,13 @@ function App() {
         />
       )}
       {view === "detail" && (
-        <ModelDetailPanel model={model} usage={usage} usageState={usageState} onBack={() => setView("dashboard")} />
+        <ModelDetailPanel
+          currentProvider={currentProvider}
+          model={model}
+          usage={usage}
+          usageState={usageState}
+          onBack={() => setView("dashboard")}
+        />
       )}
     </div>
   );
@@ -279,28 +411,77 @@ function BrandIcon({ size = 32 }: { size?: number }) {
   );
 }
 
+function MimoBrandIcon({ size = 32 }: { size?: number }) {
+  return (
+    <div className="brand-icon" style={{ width: size, height: size }}>
+      <img src="/assets/mimo-color.png" alt="MiMo" />
+    </div>
+  );
+}
+
+function ProviderSwitch({
+  currentProvider,
+  onChange,
+}: {
+  currentProvider: ProviderName;
+  onChange: (provider: ProviderName) => void;
+}) {
+  const isDeepSeek = currentProvider === "deepseek";
+  const toggle = () => onChange(isDeepSeek ? "mimo" : "deepseek");
+
+  return (
+    <button
+      className="provider-switch"
+      onClick={toggle}
+      title={isDeepSeek ? "切换到 MiMo" : "切换到 DeepSeek"}
+      aria-label={isDeepSeek ? "切换到 MiMo" : "切换到 DeepSeek"}
+    >
+      <span className="provider-switch-icon">
+        {isDeepSeek ? <BrandIcon size={18} /> : <MimoBrandIcon size={18} />}
+      </span>
+      <ArrowLeftRight size={14} />
+    </button>
+  );
+}
+
 function DashboardPanel({
+  currentProvider,
   balance,
   balanceState,
   balanceError,
   usage,
   usageState,
   usageError,
+  mimoBalance,
+  mimoBalanceState,
+  mimoBalanceError,
+  mimoPlan,
+  mimoPlanState,
+  mimoPlanError,
   onRefresh,
   onClose,
   onSettings,
   onDetail,
+  onProviderChange,
 }: {
+  currentProvider: ProviderName;
   balance: BalanceData | null;
   balanceState: BalanceState;
   balanceError: string;
   usage: UsageResult | null;
   usageState: BalanceState;
   usageError: string;
+  mimoBalance: MimoBalanceData | null;
+  mimoBalanceState: BalanceState;
+  mimoBalanceError: string;
+  mimoPlan: MimoPlanItem[] | null;
+  mimoPlanState: BalanceState;
+  mimoPlanError: string;
   onRefresh: () => void;
   onClose: () => void;
   onSettings: () => void;
   onDetail: (model: ModelName) => void;
+  onProviderChange: (provider: ProviderName) => void;
 }) {
   const [theme, setTheme] = React.useState<string>(
     () => localStorage.getItem("ui-theme") || "dark",
@@ -318,13 +499,18 @@ function DashboardPanel({
   const todayCost = usageState === "ok" && today ? today.totalCost : null;
   const monthCost = usageState === "ok" && usage ? usage.monthCost : null;
 
+  const isDeepSeek = currentProvider === "deepseek";
+  const title = isDeepSeek ? "DeepSeek Monitor" : "MiMo Monitor";
+  const providerIcon = isDeepSeek ? <BrandIcon size={36} /> : <MimoBrandIcon size={36} />;
+
   return (
     <section className="panel dashboard-panel" data-testid="dashboard-panel">
       <header className="panel-header" data-tauri-drag-region>
         <div className="title-lockup" data-tauri-drag-region>
-          <BrandIcon size={36} />
-          <h1>DeepSeek Monitor</h1>
+          {providerIcon}
+          <h1>{title}</h1>
         </div>
+        <ProviderSwitch currentProvider={currentProvider} onChange={onProviderChange} />
         <div className="header-actions">
           <button aria-label="刷新" onClick={onRefresh}>
             <RefreshCw size={22} />
@@ -348,49 +534,135 @@ function DashboardPanel({
         </div>
       </header>
 
-      <BalanceCard
-        balance={balance}
-        state={balanceState}
-        error={balanceError}
-        todayCost={todayCost}
-        monthCost={monthCost}
-      />
+      {isDeepSeek ? (
+        <>
+          <BalanceCard
+            currentProvider={currentProvider}
+            balance={balance}
+            state={balanceState}
+            error={balanceError}
+            todayCost={todayCost}
+            monthCost={monthCost}
+            mimoBalance={null}
+            mimoBalanceState="loading"
+          />
 
-      <div className="usage-stack">
-        <UsageRow
-          modelKey="flash"
-          data={flash}
-          maxTokens={maxTokens}
-          state={usageState}
-          onClick={() => onDetail("flash")}
-        />
-        <UsageRow
-          modelKey="pro"
-          data={pro}
-          maxTokens={maxTokens}
-          state={usageState}
-          onClick={() => onDetail("pro")}
-        />
-      </div>
+          <div className="usage-stack">
+            <UsageRow
+              currentProvider={currentProvider}
+              modelKey="flash"
+              data={flash}
+              maxTokens={maxTokens}
+              state={usageState}
+              onClick={() => onDetail("flash")}
+            />
+            <UsageRow
+              currentProvider={currentProvider}
+              modelKey="pro"
+              data={pro}
+              maxTokens={maxTokens}
+              state={usageState}
+              onClick={() => onDetail("pro")}
+            />
+          </div>
 
-      <UsageChart usage={usage} state={usageState} error={usageError} />
+          <UsageChart currentProvider={currentProvider} usage={usage} state={usageState} error={usageError} />
+        </>
+      ) : (
+        <>
+          <BalanceCard
+            currentProvider={currentProvider}
+            balance={null}
+            state={mimoBalanceState}
+            error={mimoBalanceError}
+            todayCost={null}
+            monthCost={null}
+            mimoBalance={mimoBalance}
+            mimoBalanceState={mimoBalanceState}
+          />
+
+          <MimoPlanCards plan={mimoPlan} state={mimoPlanState} error={mimoPlanError} />
+
+          <UsageChart currentProvider={currentProvider} usage={usage} state={mimoPlanState} error={mimoPlanError} />
+        </>
+      )}
     </section>
   );
 }
 
 function BalanceCard({
+  currentProvider,
   balance,
   state,
   error,
   todayCost,
   monthCost,
+  mimoBalance,
+  mimoBalanceState,
 }: {
+  currentProvider: ProviderName;
   balance: BalanceData | null;
   state: BalanceState;
   error: string;
   todayCost: number | null;
   monthCost: number | null;
+  mimoBalance: MimoBalanceData | null;
+  mimoBalanceState: BalanceState;
 }) {
+  const isDeepSeek = currentProvider === "deepseek";
+
+  if (!isDeepSeek && mimoBalance) {
+    // MIMO balance display
+    const statusText =
+      mimoBalanceState === "ok"
+        ? parseFloat(mimoBalance.totalBalance) > 0
+          ? "可用"
+          : "余额不足"
+        : "—";
+    const amount = `${mimoBalance.currency === "USD" ? "$" : "¥"}${mimoBalance.totalBalance}`;
+
+    return (
+      <article className="card balance-card">
+        <div className="card-title-row">
+          <div className="caption-with-icon">
+            <CreditCard size={15} />
+            <span>MIMO 账户余额</span>
+          </div>
+          <div className="status-pill">
+            <span />
+            {statusText}
+          </div>
+        </div>
+        <div className="balance-amount">{amount}</div>
+        {mimoBalanceState === "error" && <div className="balance-error">{error}</div>}
+        <div className="metric-grid mimo-balance-grid">
+          <div className="mini-card">
+            <div className="caption-with-icon">
+              <SunMedium size={15} />
+              <span>现金余额</span>
+            </div>
+            <strong>{mimoBalance.cashBalance}</strong>
+          </div>
+          <div className="mini-card">
+            <div className="caption-with-icon">
+              <CalendarDays size={15} />
+              <span>赠送余额</span>
+            </div>
+            <strong>{mimoBalance.giftBalance}</strong>
+          </div>
+          <div className="mini-card">
+            <div className="caption-with-icon">
+              <CreditCard size={15} />
+              <span>冻结余额</span>
+            </div>
+            <strong>{mimoBalance.frozenBalance}</strong>
+          </div>
+        </div>
+      </article>
+    );
+  }
+
+  // DeepSeek balance display (existing)
   const symbol = balance?.currency === "USD" ? "$" : "¥";
   const amount =
     state === "loading"
@@ -438,20 +710,23 @@ function BalanceCard({
 }
 
 function UsageRow({
+  currentProvider,
   modelKey,
   data,
   maxTokens,
   state,
   onClick,
 }: {
+  currentProvider: ProviderName;
   modelKey: ModelName;
   data: UsageModel | null;
   maxTokens: number;
   state: BalanceState;
   onClick: () => void;
 }) {
+  const isDeepSeek = currentProvider === "deepseek";
   const isFlash = modelKey === "flash";
-  const name = isFlash ? "V4 Flash" : "V4 Pro";
+  const name = isDeepSeek ? (isFlash ? "V4 Flash" : "V4 Pro") : modelKey === "plan" ? "套餐积分" : "补偿积分";
   const tokensText = data
     ? `${fmtInt(data.totalTokens)} Tokens`
     : state === "loading"
@@ -465,6 +740,39 @@ function UsageRow({
   const ratio = data && data.cost > 0 ? `${fmtTokensShort(data.totalTokens / data.cost)} T/¥` : "—";
   const width = data ? `${Math.max(2, (data.totalTokens / maxTokens) * 100)}%` : "0%";
 
+  if (!isDeepSeek && data) {
+    // MIMO usage row - show remaining instead of cost/ratio
+    const totalAvailable = data.totalTokens + data.cacheHitTokens;
+    const used = data.totalTokens;
+    const remaining = Math.max(0, totalAvailable - used);
+    const progressWidth = totalAvailable > 0 ? `${Math.max(2, (used / totalAvailable) * 100)}%` : "0%";
+
+    return (
+      <button className="card usage-row" onClick={onClick}>
+        <div className={`model-badge ${modelKey === "plan" ? "flash" : "pro"}`}>
+          {modelKey === "plan" ? <Zap size={27} fill="currentColor" /> : <Brain size={25} />}
+        </div>
+        <div className="usage-main">
+          <h2>{name}</h2>
+          <div className="token-line">
+            <span>{fmtInt(used)} / {fmtInt(totalAvailable)}</span>
+            <div className="progress-track">
+              <i className={modelKey === "plan" ? "flash-fill" : "pro-fill"} style={{ width: progressWidth }} />
+            </div>
+          </div>
+          <span className={`cache-hit-rate ${modelKey === "plan" ? "flash" : "pro"}`}>
+            剩余 {fmtInt(remaining)}
+          </span>
+        </div>
+        <div className="usage-price">
+          <strong>{fmtTokensShort(remaining)}</strong>
+          <span>剩余</span>
+        </div>
+      </button>
+    );
+  }
+
+  // DeepSeek usage row (existing)
   return (
     <button className="card usage-row" onClick={onClick}>
       <div className={`model-badge ${isFlash ? "flash" : "pro"}`}>
@@ -493,20 +801,83 @@ function UsageRow({
   );
 }
 
+function MimoPlanCards({
+  plan,
+  state,
+  error,
+}: {
+  plan: MimoPlanItem[] | null;
+  state: BalanceState;
+  error: string;
+}) {
+  const placeholder =
+    state === "loading"
+      ? "查询中…"
+      : state === "nokey"
+        ? "未配置"
+        : state === "error"
+          ? error
+          : "暂无数据";
+
+  return (
+    <div className="usage-stack">
+      {state === "ok" && plan ? (
+        plan.map((item) => {
+          const pct = item.total > 0 ? ((item.used / item.total) * 100).toFixed(0) : "0";
+          const width = item.total > 0 ? `${Math.max(2, (item.used / item.total) * 100)}%` : "0%";
+          const remaining = Math.max(0, item.total - item.used);
+
+          return (
+            <div className="card usage-row" key={item.name}>
+              <div className={`model-badge ${item.name === "plan" ? "flash" : "pro"}`}>
+                {item.name === "plan" ? <Zap size={27} fill="currentColor" /> : <Brain size={25} />}
+              </div>
+              <div className="usage-main">
+                <h2>{item.planName || (item.name === "plan" ? "套餐积分" : "补偿积分")}</h2>
+                <div className="token-line">
+                  <span>
+                    {fmtInt(item.used)} / {fmtInt(item.total)} ({pct}%)
+                  </span>
+                  <div className="progress-track">
+                    <i className={item.name === "plan" ? "flash-fill" : "pro-fill"} style={{ width }} />
+                  </div>
+                </div>
+                <span className={`cache-hit-rate ${item.name === "plan" ? "flash" : "pro"}`}>
+                  剩余 {fmtInt(remaining)} tokens
+                </span>
+              </div>
+              <div className="usage-price">
+                <strong>{fmtTokensShort(remaining)}</strong>
+                <span>剩余</span>
+              </div>
+            </div>
+          );
+        })
+      ) : (
+        <div className="chart-placeholder" style={{ padding: "24px 0" }}>
+          {placeholder}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function UsageChart({
+  currentProvider,
   usage,
   state,
   error,
 }: {
+  currentProvider: ProviderName;
   usage: UsageResult | null;
   state: BalanceState;
   error: string;
 }) {
   const [hoveredIdx, setHoveredIdx] = React.useState<number | null>(null);
   const MIN_BAR = 3;
+  const isDeepSeek = currentProvider === "deepseek";
   const days = recentUsageDays(usage?.days ?? []);
   const points = days.map((day) => {
-    // Flash 与 Pro 合并，不分模型
     const hit = day.flashCacheHit + day.proCacheHit;
     const miss = day.flashCacheMiss + day.proCacheMiss;
     const response = day.flashResponse + day.proResponse;
@@ -531,10 +902,14 @@ function UsageChart({
       <div className="card-title-row">
         <div className="caption-with-icon">
           <BarChart3 size={16} className="brand-blue" />
-          <span>缓存命中明细</span>
+          <span>{isDeepSeek ? "缓存命中明细" : "Token 用量"}</span>
         </div>
         <span className="chart-total">
-          {state === "ok" ? `命中率 ${hitRate}% · 合计 ${fmtTokensShort(sumTotal)}` : "—"}
+          {state === "ok"
+            ? isDeepSeek
+              ? `命中率 ${hitRate}% · 合计 ${fmtTokensShort(sumTotal)}`
+              : `合计 ${fmtTokensShort(sumTotal)}`
+            : "—"}
         </span>
       </div>
       {state === "ok" && points.length > 0 ? (
@@ -552,18 +927,22 @@ function UsageChart({
                       <span className="bar-tooltip-date">{point.date}</span>
                       <strong>{fmtInt(point.total)} tokens</strong>
                     </div>
-                    <span className="bar-tooltip-row">
-                      <i className="dot hit" />输入（命中缓存）
-                      <strong>{fmtInt(point.hit)} tokens</strong>
-                    </span>
-                    <span className="bar-tooltip-row">
-                      <i className="dot miss" />输入（未命中缓存）
-                      <strong>{fmtInt(point.miss)} tokens</strong>
-                    </span>
-                    <span className="bar-tooltip-row">
-                      <i className="dot response" />输出
-                      <strong>{fmtInt(point.response)} tokens</strong>
-                    </span>
+                    {isDeepSeek && (
+                      <>
+                        <span className="bar-tooltip-row">
+                          <i className="dot hit" />输入（命中缓存）
+                          <strong>{fmtInt(point.hit)} tokens</strong>
+                        </span>
+                        <span className="bar-tooltip-row">
+                          <i className="dot miss" />输入（未命中缓存）
+                          <strong>{fmtInt(point.miss)} tokens</strong>
+                        </span>
+                        <span className="bar-tooltip-row">
+                          <i className="dot response" />输出
+                          <strong>{fmtInt(point.response)} tokens</strong>
+                        </span>
+                      </>
+                    )}
                   </div>
                 )}
                 <span className="bar-value">
@@ -579,13 +958,17 @@ function UsageChart({
                     onMouseLeave={() => setHoveredIdx(null)}
                   >
                     {point.total > 0 ? (
-                      <>
-                        {point.hit > 0 && <i className="seg hit" style={{ flexGrow: point.hit }} />}
-                        {point.miss > 0 && <i className="seg miss" style={{ flexGrow: point.miss }} />}
-                        {point.response > 0 && (
-                          <i className="seg response" style={{ flexGrow: point.response }} />
-                        )}
-                      </>
+                      isDeepSeek ? (
+                        <>
+                          {point.hit > 0 && <i className="seg hit" style={{ flexGrow: point.hit }} />}
+                          {point.miss > 0 && <i className="seg miss" style={{ flexGrow: point.miss }} />}
+                          {point.response > 0 && (
+                            <i className="seg response" style={{ flexGrow: point.response }} />
+                          )}
+                        </>
+                      ) : (
+                        <i className="seg response" style={{ flexGrow: point.total }} />
+                      )
                     ) : (
                       <i className="seg empty" />
                     )}
@@ -595,17 +978,19 @@ function UsageChart({
               </div>
             ))}
           </div>
-          <div className="chart-legend-bottom">
-            <span className="chart-legend-item">
-              <i className="dot hit" />命中
-            </span>
-            <span className="chart-legend-item">
-              <i className="dot miss" />未命中
-            </span>
-            <span className="chart-legend-item">
-              <i className="dot response" />输出
-            </span>
-          </div>
+          {isDeepSeek && (
+            <div className="chart-legend-bottom">
+              <span className="chart-legend-item">
+                <i className="dot hit" />命中
+              </span>
+              <span className="chart-legend-item">
+                <i className="dot miss" />未命中
+              </span>
+              <span className="chart-legend-item">
+                <i className="dot response" />输出
+              </span>
+            </div>
+          )}
         </>
       ) : (
         <div className="chart-placeholder">{placeholder}</div>
@@ -615,12 +1000,16 @@ function UsageChart({
 }
 
 function SettingsPanel({
+  currentProvider,
+  onProviderChange,
   onBack,
   onUsageLoaded,
   onUsageCleared,
   onRefreshIntervalChanged,
   onAutoRefreshChanged,
 }: {
+  currentProvider: ProviderName;
+  onProviderChange: (provider: ProviderName) => void;
   onBack: () => void;
   onUsageLoaded: (usage: UsageResult) => void;
   onUsageCleared: () => void;
@@ -639,7 +1028,15 @@ function SettingsPanel({
   const [usageSyncing, setUsageSyncing] = React.useState(false);
   const [showManualPaste, setShowManualPaste] = React.useState(false);
   const [appVersion, setAppVersion] = React.useState("1.1.0");
+
+  // MIMO cookie states
+  const [mimoCookie, setMimoCookie] = React.useState("");
+  const [mimoCookieSyncing, setMimoCookieSyncing] = React.useState(false);
+  const [mimoCookieStatus, setMimoCookieStatus] = React.useState("");
+  const [showMimoManualPaste, setShowMimoManualPaste] = React.useState(false);
+
   const configPath = config?.configPath ?? "%APPDATA%\\DeepSeekMonitorWindows\\config.json";
+  const isDeepSeek = currentProvider === "deepseek";
 
   React.useEffect(() => {
     void invoke<AppConfig>("get_app_config")
@@ -650,6 +1047,7 @@ function SettingsPanel({
         setAutostart(nextConfig.autostart);
         setStatus(nextConfig.apiKeyConfigured ? `已配置 ${nextConfig.apiKeyPreview}` : "未配置 API Key");
         setUsageStatus(nextConfig.usageTokenConfigured ? "用量 Token 已配置" : "未配置用量 Token");
+        setMimoCookieStatus(nextConfig.mimoCookieConfigured ? "MIMO Cookie 已配置" : "未配置 MIMO Cookie");
       })
       .catch(() => {
         setStatus("浏览器预览模式，未连接本地配置");
@@ -695,6 +1093,18 @@ function SettingsPanel({
     const unlistenPromise = listen("usage-sync-ended", () => {
       setUsageSyncing(false);
       setUsageStatus("登录窗口已关闭，Token 未获取到。可重新点击同步或使用方式二手动粘贴。");
+    });
+    return () => {
+      void unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, []);
+
+  // Listen for MIMO cookie captured event
+  React.useEffect(() => {
+    const unlistenPromise = listen<AppConfig>("mimo-cookie-captured", (event) => {
+      setConfig(event.payload);
+      setMimoCookieSyncing(false);
+      setMimoCookieStatus("已通过网页登录自动同步 MIMO Cookie");
     });
     return () => {
       void unlistenPromise.then((unlisten) => unlisten());
@@ -763,13 +1173,11 @@ function SettingsPanel({
         if (!synced) {
           setUsageStatus("登录完成后，再次点击本按钮即可同步用量（可多点几次）");
         }
-        // synced=true 时由 usage-token-captured 事件刷新数据并更新状态
       })
       .catch((error) => {
         setUsageStatus(typeof error === "string" ? error : "打开登录窗口失败");
       })
       .finally(() => {
-        // 短暂忙碌后自动恢复可点击，允许用户登录后反复点击触发同步
         window.setTimeout(() => setUsageSyncing(false), 2500);
       });
   }, []);
@@ -803,6 +1211,62 @@ function SettingsPanel({
       })
       .finally(() => setBusy(false));
   }, [onUsageCleared]);
+
+  // MIMO cookie actions
+  const pasteMimoCookie = React.useCallback(async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      setMimoCookie(text.trim());
+      setMimoCookieStatus("已从剪贴板读取");
+    } catch {
+      setMimoCookieStatus("剪贴板读取失败");
+    }
+  }, []);
+
+  const startMimoSync = React.useCallback(() => {
+    setMimoCookieSyncing(true);
+    setMimoCookieStatus("正在打开登录窗口…");
+    void invoke<boolean>("start_mimo_sync")
+      .then((synced) => {
+        if (!synced) {
+          setMimoCookieStatus("登录完成后，再次点击本按钮即可同步 Cookie");
+        }
+      })
+      .catch((error) => {
+        setMimoCookieStatus(typeof error === "string" ? error : "打开登录窗口失败");
+      })
+      .finally(() => {
+        window.setTimeout(() => setMimoCookieSyncing(false), 2500);
+      });
+  }, []);
+
+  const saveMimoCookie = React.useCallback(() => {
+    setBusy(true);
+    void invoke<AppConfig>("save_mimo_cookie", { mimoCookie })
+      .then((nextConfig) => {
+        setConfig(nextConfig);
+        setMimoCookie("");
+        setMimoCookieStatus("MIMO Cookie 已保存");
+      })
+      .catch((error) => {
+        setMimoCookieStatus(typeof error === "string" ? error : "保存失败");
+      })
+      .finally(() => setBusy(false));
+  }, [mimoCookie]);
+
+  const clearMimoCookie = React.useCallback(() => {
+    setBusy(true);
+    void invoke<AppConfig>("clear_mimo_cookie")
+      .then((nextConfig) => {
+        setConfig(nextConfig);
+        setMimoCookie("");
+        setMimoCookieStatus("已清除 MIMO Cookie");
+      })
+      .catch((error) => {
+        setMimoCookieStatus(typeof error === "string" ? error : "清除失败");
+      })
+      .finally(() => setBusy(false));
+  }, []);
 
   const saveRefreshInterval = React.useCallback(
     (seconds: number) => {
@@ -853,6 +1317,9 @@ function SettingsPanel({
       .catch(() => setAutostart(previous));
   }, [autostart]);
 
+  const providerIcon = isDeepSeek ? <BrandIcon size={42} /> : <MimoBrandIcon size={42} />;
+  const settingsTitle = isDeepSeek ? "DeepSeek Monitor" : "MiMo Monitor";
+
   return (
     <section className="settings-panel" data-testid="settings-panel">
       <button className="floating-close settings-close" onClick={onBack} aria-label="返回主面板">
@@ -860,97 +1327,153 @@ function SettingsPanel({
       </button>
       <div className="settings-inner">
         <header className="settings-header" data-tauri-drag-region>
-          <BrandIcon size={42} />
+          {providerIcon}
           <div>
-            <h1>DeepSeek Monitor</h1>
+            <h1>{settingsTitle}</h1>
             <p>设置</p>
           </div>
         </header>
 
-        <SettingsSection icon={<KeyRound size={15} />} title="API Key">
-          <p>用于调用 DeepSeek API 获取余额和用量数据。当前 Windows 版本会保存在应用本地设置中。</p>
-          <p className="muted">API Key 只在当前这台 Windows 电脑本地保留。</p>
-          <p className="muted config-path">
-            <span>本地位置：</span>
-            <span>{configPath}</span>
-          </p>
-          <div className="key-row">
-            <input
-              aria-label="API Key"
-              type="password"
-              value={apiKey}
-              placeholder={config?.apiKeyConfigured ? "••••••••••••••••••••••••••••••••••••••••••••••••••" : "sk-..."}
-              onChange={(event) => setApiKey(event.target.value)}
-            />
-          </div>
-          <div className="settings-actions">
-            <button className="primary" onClick={saveApiKey} disabled={busy || !apiKey.trim()}>
-              验证并保存
-            </button>
-            <span className={config?.apiKeyConfigured ? "configured" : "configured muted-status"}>
-              <CheckCircle2 size={17} />
-              {config?.apiKeyConfigured ? "已配置" : "未配置"}
-            </span>
-            <button className="secondary" onClick={clearApiKey} disabled={busy || !config?.apiKeyConfigured}>
-              清除 Key
-            </button>
-          </div>
+        <SettingsSection icon={<ArrowLeftRight size={15} />} title="服务商切换">
+          <p>当前服务商：{isDeepSeek ? "DeepSeek" : "小米 MIMO"}</p>
+          <ProviderSwitch currentProvider={currentProvider} onChange={onProviderChange} />
         </SettingsSection>
 
-        <SettingsSection icon={<BarChart3 size={15} />} title="用量同步 Token">
-          <p>用于同步 Token 用量、消费和趋势图。DeepSeek 无官方用量 API，需网页登录 token（与上面的 API Key 不同）。</p>
-          <p className="muted">方式一网页登录自动同步</p>
-          <div className="settings-actions usage-sync-actions">
-            <button className="primary" onClick={startUsageSync} disabled={usageSyncing}>
-              {usageSyncing ? "等待登录" : "网页登录自动同步"}
-            </button>
-            <span className={config?.usageTokenConfigured ? "configured" : "configured muted-status"}>
-              <CheckCircle2 size={17} />
-              {config?.usageTokenConfigured ? "已配置" : "未配置"}
-            </span>
-            <button className="secondary" onClick={clearUsageToken} disabled={busy || !config?.usageTokenConfigured}>
-              清除 Token
-            </button>
-          </div>
-          <p className="muted">{usageStatus}</p>
-          <button
-            className="link-button"
-            onClick={() => setShowManualPaste((value) => !value)}
-          >
-            {showManualPaste ? "收起手动粘贴" : "方式二：手动粘贴 token"}
-          </button>
-          {showManualPaste && (
-            <>
-              <p className="muted">
-                获取：浏览器登录 platform.deepseek.com，按 F12 打开控制台，输入
-                JSON.parse(localStorage.userToken).value 回车，复制返回的字符串。
+        {isDeepSeek ? (
+          <>
+            <SettingsSection icon={<KeyRound size={15} />} title="API Key">
+              <p>用于调用 DeepSeek API 获取余额和用量数据。当前 Windows 版本会保存在应用本地设置中。</p>
+              <p className="muted">API Key 只在当前这台 Windows 电脑本地保留。</p>
+              <p className="muted config-path">
+                <span>本地位置：</span>
+                <span>{configPath}</span>
               </p>
-              <p className="muted">token 会过期，用量查询失败时重新获取一次即可。</p>
               <div className="key-row">
                 <input
-                  aria-label="用量 Token"
+                  aria-label="API Key"
                   type="password"
-                  value={usageToken}
-                  placeholder={config?.usageTokenConfigured ? "••••••••••••••••••••••••••••••••••••••••••••••••••" : ""}
-                  onChange={(event) => setUsageToken(event.target.value)}
+                  value={apiKey}
+                  placeholder={config?.apiKeyConfigured ? "••••••••••••••••••••••••••••••••••••••••••••••••••" : "sk-..."}
+                  onChange={(event) => setApiKey(event.target.value)}
                 />
               </div>
               <div className="settings-actions">
-                <button className="primary" onClick={saveUsageToken} disabled={busy || !usageToken.trim()}>
-                  保存 Token
+                <button className="primary" onClick={saveApiKey} disabled={busy || !apiKey.trim()}>
+                  验证并保存
+                </button>
+                <span className={config?.apiKeyConfigured ? "configured" : "configured muted-status"}>
+                  <CheckCircle2 size={17} />
+                  {config?.apiKeyConfigured ? "已配置" : "未配置"}
+                </span>
+                <button className="secondary" onClick={clearApiKey} disabled={busy || !config?.apiKeyConfigured}>
+                  清除 Key
                 </button>
               </div>
-            </>
-          )}
-        </SettingsSection>
+            </SettingsSection>
+
+            <SettingsSection icon={<BarChart3 size={15} />} title="用量同步 Token">
+              <p>用于同步 Token 用量、消费和趋势图。DeepSeek 无官方用量 API，需网页登录 token（与上面的 API Key 不同）。</p>
+              <p className="muted">方式一网页登录自动同步</p>
+              <div className="settings-actions usage-sync-actions">
+                <button className="primary" onClick={startUsageSync} disabled={usageSyncing}>
+                  {usageSyncing ? "等待登录" : "网页登录自动同步"}
+                </button>
+                <span className={config?.usageTokenConfigured ? "configured" : "configured muted-status"}>
+                  <CheckCircle2 size={17} />
+                  {config?.usageTokenConfigured ? "已配置" : "未配置"}
+                </span>
+                <button className="secondary" onClick={clearUsageToken} disabled={busy || !config?.usageTokenConfigured}>
+                  清除 Token
+                </button>
+              </div>
+              <p className="muted">{usageStatus}</p>
+              <button
+                className="link-button"
+                onClick={() => setShowManualPaste((value) => !value)}
+              >
+                {showManualPaste ? "收起手动粘贴" : "方式二：手动粘贴 token"}
+              </button>
+              {showManualPaste && (
+                <>
+                  <p className="muted">
+                    获取：浏览器登录 platform.deepseek.com，按 F12 打开控制台，输入
+                    JSON.parse(localStorage.userToken).value 回车，复制返回的字符串。
+                  </p>
+                  <p className="muted">token 会过期，用量查询失败时重新获取一次即可。</p>
+                  <div className="key-row">
+                    <input
+                      aria-label="用量 Token"
+                      type="password"
+                      value={usageToken}
+                      placeholder={config?.usageTokenConfigured ? "••••••••••••••••••••••••••••••••••••••••••••••••••" : ""}
+                      onChange={(event) => setUsageToken(event.target.value)}
+                    />
+                  </div>
+                  <div className="settings-actions">
+                    <button className="primary" onClick={saveUsageToken} disabled={busy || !usageToken.trim()}>
+                      保存 Token
+                    </button>
+                  </div>
+                </>
+              )}
+            </SettingsSection>
+          </>
+        ) : (
+          <>
+            <SettingsSection icon={<KeyRound size={15} />} title="MIMO Cookie">
+              <p>用于获取小米 MIMO 平台的余额和用量数据。需要配置浏览器 Cookie 信息。</p>
+              <p className="muted">方式一网页登录自动同步</p>
+              <div className="settings-actions usage-sync-actions">
+                <button className="primary" onClick={startMimoSync} disabled={mimoCookieSyncing}>
+                  {mimoCookieSyncing ? "等待登录" : "网页登录自动同步"}
+                </button>
+                <span className={config?.mimoCookieConfigured ? "configured" : "configured muted-status"}>
+                  <CheckCircle2 size={17} />
+                  {config?.mimoCookieConfigured ? "已配置" : "未配置"}
+                </span>
+                <button className="secondary" onClick={clearMimoCookie} disabled={busy || !config?.mimoCookieConfigured}>
+                  清除 Cookie
+                </button>
+              </div>
+              <p className="muted">{mimoCookieStatus}</p>
+              <button
+                className="link-button"
+                onClick={() => setShowMimoManualPaste((value) => !value)}
+              >
+                {showMimoManualPaste ? "收起手动粘贴" : "方式二：手动粘贴 Cookie"}
+              </button>
+              {showMimoManualPaste && (
+                <>
+                  <p className="muted">
+                    从浏览器开发者工具中复制 MIMO 平台的完整 Cookie 字符串，粘贴到下方输入框中保存。
+                  </p>
+                  <div className="key-row">
+                    <input
+                      aria-label="MIMO Cookie"
+                      type="password"
+                      value={mimoCookie}
+                      placeholder={config?.mimoCookieConfigured ? "••••••••••••••••••••••••••••••••••••••••••••••••••" : ""}
+                      onChange={(event) => setMimoCookie(event.target.value)}
+                    />
+                  </div>
+                  <div className="settings-actions">
+                    <button className="primary" onClick={saveMimoCookie} disabled={busy || !mimoCookie.trim()}>
+                      保存 Cookie
+                    </button>
+                  </div>
+                </>
+              )}
+            </SettingsSection>
+          </>
+        )}
 
         <SettingsSection icon={<Power size={15} />} title="开机自启">
-          <p>开启后，每次登录 Windows 时自动启动 DeepSeek Monitor。</p>
+          <p>开启后，每次登录 Windows 时自动启动 {isDeepSeek ? "DeepSeek" : "MiMo"} Monitor。</p>
           <Toggle label="登录时自动启动" checked={autostart} onChange={saveAutostart} />
         </SettingsSection>
 
         <SettingsSection icon={<RefreshCw size={15} />} title="自动刷新">
-          <p>开启后，按设定周期自动从 DeepSeek API 拉取最新数据。</p>
+          <p>开启后，按设定周期自动从{isDeepSeek ? " DeepSeek API" : " MIMO 平台"}拉取最新数据。</p>
           <Toggle label="启用自动刷新" checked={autoRefresh} onChange={saveAutoRefreshEnabled} />
           {autoRefresh && (
             <div className="segmented">
@@ -1018,28 +1541,39 @@ function Toggle({
 }
 
 function ModelDetailPanel({
+  currentProvider,
   model,
   usage,
   usageState,
   onBack,
 }: {
+  currentProvider: ProviderName;
   model: ModelName;
   usage: UsageResult | null;
   usageState: BalanceState;
   onBack: () => void;
 }) {
+  const isDeepSeek = currentProvider === "deepseek";
   const isFlash = model === "flash";
   const data = usage?.models.find((item) => item.key === model) ?? null;
-  const title = isFlash ? "V4 Flash" : "V4 Pro";
-  const tintClass = isFlash ? "flash" : "pro";
+
+  const title = isDeepSeek
+    ? isFlash
+      ? "V4 Flash"
+      : "V4 Pro"
+    : model === "plan"
+      ? "套餐积分"
+      : "补偿积分";
+
+  const tintClass = isDeepSeek ? (isFlash ? "flash" : "pro") : model === "plan" ? "flash" : "pro";
   const cost = data ? fmtMoney(data.cost) : "—";
   const totalText = data ? fmtTokensShort(data.totalTokens) : "—";
 
   const days = recentUsageDays(usage?.days ?? []);
   const points = days.map((day) => {
-    const hit = isFlash ? day.flashCacheHit : day.proCacheHit;
-    const miss = isFlash ? day.flashCacheMiss : day.proCacheMiss;
-    const response = isFlash ? day.flashResponse : day.proResponse;
+    const hit = isDeepSeek ? (isFlash ? day.flashCacheHit : day.proCacheHit) : 0;
+    const miss = isDeepSeek ? (isFlash ? day.flashCacheMiss : day.proCacheMiss) : 0;
+    const response = isDeepSeek ? (isFlash ? day.flashResponse : day.proResponse) : 0;
     return { date: day.date, hit, miss, response, total: hit + miss + response };
   });
   const maxVal = Math.max(...points.map((point) => point.total), 1);
@@ -1047,7 +1581,7 @@ function ModelDetailPanel({
     points.length > 0 ? `${mmdd(points[0].date)} - ${mmdd(points[points.length - 1].date)}` : "";
 
   const [hoveredIdx, setHoveredIdx] = React.useState<number | null>(null);
-  const MIN_BAR = 3; // 整根柱子的最小可见高度百分比（含空数据占位）
+  const MIN_BAR = 3;
 
   return (
     <section className="panel detail-panel" data-testid="detail-panel">
@@ -1056,17 +1590,17 @@ function ModelDetailPanel({
       </button>
       <article className="card detail-hero" data-tauri-drag-region>
         <div className={`model-badge large ${tintClass}`}>
-          {isFlash ? <Zap size={34} fill="currentColor" /> : <Brain size={33} />}
+          {tintClass === "flash" ? <Zap size={34} fill="currentColor" /> : <Brain size={33} />}
         </div>
         <div>
           <h1>{title}</h1>
-          <p>{cost}</p>
+          <p>{isDeepSeek ? cost : totalText}</p>
         </div>
       </article>
 
       <div className="detail-metrics">
         <article className="card metric-card">
-          <span>API 请求次数</span>
+          <span>{isDeepSeek ? "API 请求次数" : "已使用"}</span>
           <strong className={tintClass}>{data ? fmtInt(data.requestCount) : "—"}</strong>
         </article>
         <article className="card metric-card">
@@ -1097,23 +1631,26 @@ function ModelDetailPanel({
                         <span className="bar-tooltip-date">{point.date}</span>
                         <strong>{fmtInt(point.total)} tokens</strong>
                       </div>
-                      <span className="bar-tooltip-row">
-                        <i className="dot hit" />输入（命中缓存）
-                        <strong>{fmtInt(point.hit)} tokens</strong>
-                      </span>
-                      <span className="bar-tooltip-row">
-                        <i className="dot miss" />输入（未命中缓存）
-                        <strong>{fmtInt(point.miss)} tokens</strong>
-                      </span>
-                      <span className="bar-tooltip-row">
-                        <i className="dot response" />输出
-                        <strong>{fmtInt(point.response)} tokens</strong>
-                      </span>
+                      {isDeepSeek && (
+                        <>
+                          <span className="bar-tooltip-row">
+                            <i className="dot hit" />输入（命中缓存）
+                            <strong>{fmtInt(point.hit)} tokens</strong>
+                          </span>
+                          <span className="bar-tooltip-row">
+                            <i className="dot miss" />输入（未命中缓存）
+                            <strong>{fmtInt(point.miss)} tokens</strong>
+                          </span>
+                          <span className="bar-tooltip-row">
+                            <i className="dot response" />输出
+                            <strong>{fmtInt(point.response)} tokens</strong>
+                          </span>
+                        </>
+                      )}
                     </div>
                   )}
                   <span>{point.total > 0 ? fmtTokensShort(point.total) : ""}</span>
                   <div className="detail-bar-slot">
-                    {/* 柱高按当天合计占最大值的比例；内部三段用 flex-grow 按真实 token 数分配，比例精确且永不溢出裁剪 */}
                     <div
                       className="detail-bar-stacked"
                       style={{
@@ -1123,11 +1660,15 @@ function ModelDetailPanel({
                       onMouseLeave={() => setHoveredIdx(null)}
                     >
                       {point.total > 0 ? (
-                        <>
-                          {point.hit > 0 && <i className="seg hit" style={{ flexGrow: point.hit }} />}
-                          {point.miss > 0 && <i className="seg miss" style={{ flexGrow: point.miss }} />}
-                          {point.response > 0 && <i className="seg response" style={{ flexGrow: point.response }} />}
-                        </>
+                        isDeepSeek ? (
+                          <>
+                            {point.hit > 0 && <i className="seg hit" style={{ flexGrow: point.hit }} />}
+                            {point.miss > 0 && <i className="seg miss" style={{ flexGrow: point.miss }} />}
+                            {point.response > 0 && <i className="seg response" style={{ flexGrow: point.response }} />}
+                          </>
+                        ) : (
+                          <i className="seg response" style={{ flexGrow: point.total }} />
+                        )
                       ) : (
                         <i className="seg empty" />
                       )}
@@ -1137,11 +1678,13 @@ function ModelDetailPanel({
                 </div>
               ))}
             </div>
-            <div className="chart-legend-bottom">
-              <span className="chart-legend-item"><i className="dot hit" />命中</span>
-              <span className="chart-legend-item"><i className="dot miss" />未命中</span>
-              <span className="chart-legend-item"><i className="dot response" />输出</span>
-            </div>
+            {isDeepSeek && (
+              <div className="chart-legend-bottom">
+                <span className="chart-legend-item"><i className="dot hit" />命中</span>
+                <span className="chart-legend-item"><i className="dot miss" />未命中</span>
+                <span className="chart-legend-item"><i className="dot response" />输出</span>
+              </div>
+            )}
           </>
         ) : (
           <div className="chart-placeholder">

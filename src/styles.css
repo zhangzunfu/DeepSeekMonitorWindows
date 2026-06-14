@@ -1246,3 +1246,253 @@ button:disabled {
   color: var(--skin-accent);
   box-shadow: inset 0 0 0 1px rgba(var(--fg), 0.12);
 }
+
+/* ==================== Provider Switch ==================== */
+.provider-switch {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px 2px 4px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  background: rgba(var(--fg), 0.08);
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease;
+  pointer-events: auto;
+}
+
+.provider-switch:hover {
+  background: rgba(var(--fg), 0.16);
+  border-color: rgba(255, 255, 255, 0.32);
+}
+
+.provider-switch .provider-switch-icon {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.provider-switch .provider-switch-icon img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.provider-switch .switch-label {
+  font-size: 10px;
+  font-weight: 800;
+  color: rgba(var(--fg), 0.7);
+  white-space: nowrap;
+}
+
+.provider-switch .switch-arrow {
+  font-size: 8px;
+  color: rgba(var(--fg), 0.5);
+  margin-left: -2px;
+}
+
+/* ==================== MIMO Brand Colors ==================== */
+:root {
+  --mimo: #ff6900;
+  --mimo-light: #ff9500;
+}
+
+[data-theme="light"] {
+  --mimo: #e85d00;
+  --mimo-light: #ff7b00;
+}
+
+.mimo-brand {
+  color: var(--mimo);
+}
+
+.model-badge.mimo-plan {
+  background: rgba(255, 105, 0, 0.15);
+  color: var(--mimo);
+}
+
+.model-badge.mimo-comp {
+  background: rgba(255, 149, 0, 0.15);
+  color: var(--mimo-light);
+}
+
+/* ==================== MIMO Balance Card ==================== */
+.mimo-balance-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.mimo-balance-grid .mini-card strong {
+  color: var(--mimo);
+}
+
+/* ==================== MIMO Plan Cards ==================== */
+.mimo-plan-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.mimo-plan-card {
+  width: 100%;
+  min-height: 64px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 12px;
+}
+
+.mimo-plan-card .plan-info {
+  min-width: 0;
+  flex: 1;
+}
+
+.mimo-plan-card .plan-info h3 {
+  margin: 0 0 7px;
+  font-size: 15px;
+  line-height: 1;
+  color: rgba(var(--fg), 0.82);
+}
+
+.mimo-plan-card .plan-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mimo-plan-card .plan-bar-row span {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+  min-width: 56px;
+  max-width: 80px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.mimo-plan-card .plan-progress {
+  flex: 1;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.16);
+  overflow: hidden;
+}
+
+.mimo-plan-card .plan-progress i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--mimo), var(--mimo-light));
+  transition: width 0.3s ease;
+}
+
+.mimo-plan-card .plan-stats {
+  width: 70px;
+  text-align: right;
+}
+
+.mimo-plan-card .plan-stats strong {
+  display: block;
+  color: rgba(var(--fg), 0.78);
+  font-size: 13px;
+}
+
+.mimo-plan-card .plan-stats span {
+  display: block;
+  margin-top: 3px;
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+/* ==================== Provider Section in Settings ==================== */
+.provider-settings-section {
+  border-top: 1px solid rgba(255, 255, 255, 0.22);
+  padding: 14px 0;
+}
+
+[data-theme="light"] .provider-settings-section {
+  border-top-color: rgba(40, 70, 100, 0.14);
+}
+
+.provider-settings-section h2 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 10px;
+  font-size: 12px;
+}
+
+.provider-settings-section p {
+  margin: 0 0 8px;
+  color: rgba(var(--fg), 0.78);
+  font-size: 10px;
+  line-height: 1.5;
+  font-weight: 700;
+}
+
+.provider-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.provider-tab {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  background: rgba(var(--fg), 0.08);
+  color: rgba(var(--fg), 0.7);
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.provider-tab:hover {
+  background: rgba(var(--fg), 0.14);
+  border-color: rgba(255, 255, 255, 0.24);
+}
+
+.provider-tab.active {
+  background: rgba(77, 107, 254, 0.22);
+  border-color: var(--brand);
+  color: var(--brand);
+}
+
+[data-theme="light"] .provider-tab {
+  border-color: rgba(40, 70, 100, 0.14);
+  background: rgba(255, 255, 255, 0.52);
+  color: rgba(22, 42, 64, 0.7);
+}
+
+[data-theme="light"] .provider-tab.active {
+  background: rgba(45, 108, 246, 0.14);
+  border-color: var(--brand);
+  color: var(--brand);
+}
+
+.provider-tab .tab-icon {
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.provider-tab .tab-icon img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}

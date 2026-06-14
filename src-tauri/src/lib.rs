@@ -392,10 +392,13 @@ pub fn run() {
             code => return Err(format!("请求失败：HTTP {code}")),
         }
 
-        let data: MimoBalanceResp = response
-            .json()
+        let body = response
+            .text()
             .await
-            .map_err(|error| format!("解析余额数据失败：{error}"))?;
+            .map_err(|error| format!("读取响应体失败：{error}"))?;
+
+        let data: MimoBalanceResp = serde_json::from_str(&body)
+            .map_err(|error| format!("解析余额数据失败：{error}，响应内容：{}", &body[..body.len().min(200)]))?;
 
         let is_available = data.code == 0;
         if !is_available {
@@ -461,10 +464,13 @@ pub fn run() {
             code => return Err(format!("请求失败：HTTP {code}")),
         }
 
-        let data: MimoUsageResp = response
-            .json()
+        let body = response
+            .text()
             .await
-            .map_err(|error| format!("解析用量数据失败：{error}"))?;
+            .map_err(|error| format!("读取响应体失败：{error}"))?;
+
+        let data: MimoUsageResp = serde_json::from_str(&body)
+            .map_err(|error| format!("解析用量数据失败：{error}，响应内容：{}", &body[..body.len().min(200)]))?;
 
         if data.code != 0 {
             return Err("MIMO 用量接口返回错误".to_string());

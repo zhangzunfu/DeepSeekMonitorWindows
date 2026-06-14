@@ -23,11 +23,11 @@ import {
 } from "lucide-react";
 import "./styles.css";
 
-type ViewName = "dashboard" | "settings" | "detail";
-type ModelName = "flash" | "pro" | "plan" | "compensation";
-type ProviderName = "deepseek" | "mimo";
+输入 ViewName = "dashboard" | "settings" | "detail";
+输入 ModelName = "flash" | "pro" | "plan" | "compensation";
+输入 ProviderName = "deepseek" | "mimo";
 
-type AppConfig = {
+输入 AppConfig = {
   apiKeyConfigured: boolean;
   apiKeyPreview: string | null;
   usageTokenConfigured: boolean;
@@ -1748,4 +1748,4 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
     <App />
   </React.StrictMode>,
 );
-}
+

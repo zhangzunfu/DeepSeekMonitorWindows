@@ -507,6 +507,9 @@ function DashboardPanel({
   const todayCost = usageState === "ok" && today ? today.totalCost : null;
   const monthCost = usageState === "ok" && usage ? usage.monthCost : null;
 
+  const todayTokens = usage?.days.find((day) => day.date === todayStr())?.totalTokens ?? null;
+  const monthTokens = usage?.models.reduce((sum, m) => sum + m.totalTokens, 0) || null;
+
   const isDeepSeek = currentProvider === "deepseek";
   const title = isDeepSeek ? "DeepSeek Monitor" : "MiMo Monitor";
   const providerIcon = isDeepSeek ? <BrandIcon size={36} /> : <MimoBrandIcon size={36} />;
@@ -587,6 +590,8 @@ function DashboardPanel({
             monthCost={null}
             mimoBalance={mimoBalance}
             mimoBalanceState={mimoBalanceState}
+            todayTokens={todayTokens}
+            monthTokens={monthTokens}
           />
 
           <MimoPlanCards plan={mimoPlan} state={mimoPlanState} error={mimoPlanError} />
@@ -607,6 +612,8 @@ function BalanceCard({
   monthCost,
   mimoBalance,
   mimoBalanceState,
+  todayTokens,
+  monthTokens,
 }: {
   currentProvider: ProviderName;
   balance: BalanceData | null;
@@ -616,6 +623,8 @@ function BalanceCard({
   monthCost: number | null;
   mimoBalance: MimoBalanceData | null;
   mimoBalanceState: BalanceState;
+  todayTokens?: number | null;
+  monthTokens?: number | null;
 }) {
   const isDeepSeek = currentProvider === "deepseek";
 
@@ -647,16 +656,16 @@ function BalanceCard({
           <div className="mini-card">
             <div className="caption-with-icon">
               <SunMedium size={15} />
-              <span>现金余额</span>
+              <span>当日消耗</span>
             </div>
-            <strong>{mimoBalance.cashBalance}</strong>
+            <strong>{todayTokens != null ? fmtTokensShort(todayTokens) + " Tokens" : "—"}</strong>
           </div>
           <div className="mini-card">
             <div className="caption-with-icon">
               <CalendarDays size={15} />
-              <span>赠送余额</span>
+              <span>本月消费</span>
             </div>
-            <strong>{mimoBalance.giftBalance}</strong>
+            <strong>{monthTokens != null ? fmtTokensShort(monthTokens) + " Tokens" : "—"}</strong>
           </div>
           <div className="mini-card">
             <div className="caption-with-icon">
@@ -831,8 +840,8 @@ function MimoPlanCards({
     <div className="usage-stack">
       {state === "ok" && plan ? (
         plan.map((item) => {
-          const pct = item.total > 0 ? ((item.used / item.total) * 100).toFixed(0) : "0";
-          const width = item.total > 0 ? `${Math.max(2, (item.used / item.total) * 100)}%` : "0%";
+          const pct = item.total > 0 ? Math.min(100, ((item.used / item.total) * 100)).toFixed(0) : "0";
+          const width = item.total > 0 ? `${Math.min(100, Math.max(2, (item.used / item.total) * 100))}%` : "0%";
           const remaining = Math.max(0, item.total - item.used);
 
           return (

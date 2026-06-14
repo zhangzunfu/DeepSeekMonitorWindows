@@ -337,17 +337,17 @@ pub fn run() {
 
     #[derive(Deserialize)]
     struct MimoBalanceInfo {
-        balance: f64,
+        balance: String,
         #[serde(rename = "cashBalance")]
-        cash_balance: f64,
+        cash_balance: String,
         #[serde(rename = "giftBalance")]
-        gift_balance: f64,
+        gift_balance: String,
         #[serde(rename = "frozenBalance")]
-        frozen_balance: f64,
+        frozen_balance: String,
         #[serde(rename = "overdraftLimit")]
-        overdraft_limit: f64,
+        overdraft_limit: String,
         #[serde(rename = "remainingOverdraftLimit")]
-        remaining_overdraft_limit: f64,
+        remaining_overdraft_limit: String,
         currency: String,
     }
 
@@ -407,10 +407,10 @@ pub fn run() {
 
         Ok(MimoBalanceResult {
             currency: data.data.currency,
-            total_balance: format!("{:.2}", data.data.balance),
-            cash_balance: format!("{:.2}", data.data.cash_balance),
-            gift_balance: format!("{:.2}", data.data.gift_balance),
-            frozen_balance: format!("{:.2}", data.data.frozen_balance),
+            total_balance: data.data.balance,
+            cash_balance: data.data.cash_balance,
+            gift_balance: data.data.gift_balance,
+            frozen_balance: data.data.frozen_balance,
         })
     }
 
@@ -520,9 +520,89 @@ pub fn run() {
             },
         ];
 
+        let mut days: Vec<UsageDaySummary> = Vec::new();
+        let mut month_total_tokens: u64 = 0;
+
+        let now = chrono::Utc::now();
+        let today_str = now.format("%Y-%m-%d").to_string();
+        let month_start = now.format("%Y-%m-01").to_string();
+        let month_end = now.format("%Y-%m-%d").to_string();
+
+        if let Ok(daily_response) = client
+            .get(format!(
+                "https://platform.xiaomimimo.com/api/v1/tokenPlan/daily?startDate={}&endDate={}",
+                month_start, month_end
+            ))
+            .header("Cookie", &cookie)
+            .timeout(std::time::Duration::from_secs(15))
+            .send()
+            .await
+        {
+            if daily_response.status().is_success() {
+                if let Ok(daily_body) = daily_response.text().await {
+                    if let Ok(daily_json) = serde_json::from_str::<serde_json::Value>(&daily_body) {
+                        if let Some(data) = daily_json.get("data") {
+                            let records = data
+                                .get("records")
+                                .or_else(|| data.get("items"))
+                                .or_else(|| data.get("list"))
+                                .and_then(|v| v.as_array())
+                                .cloned()
+                                .unwrap_or_default();
+
+                            let mut today_tokens: u64 = 0;
+                            let mut day_map: std::collections::HashMap<String, u64> =
+                                std::collections::HashMap::new();
+
+                            for record in &records {
+                                let date = record
+                                    .get("date")
+                                    .or_else(|| record.get("day"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+
+                                let total = record
+                                    .get("totalTokens")
+                                    .or_else(|| record.get("total_tokens"))
+                                    .or_else(|| record.get("totalToken"))
+                                    .or_else(|| record.get("tokens"))
+                                    .and_then(|v| v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+                                    .unwrap_or(0.0) as u64;
+
+                                if total > 0 {
+                                    month_total_tokens += total;
+                                    *day_map.entry(date.clone()).or_insert(0) += total;
+                                }
+                            }
+
+                            if let Some(today_total) = day_map.get(&today_str) {
+                                today_tokens = *today_total;
+                            }
+
+                            let today_day = UsageDaySummary {
+                                date: today_str,
+                                flash_tokens: 0,
+                                flash_cache_hit: 0,
+                                flash_cache_miss: 0,
+                                flash_response: 0,
+                                pro_tokens: today_tokens,
+                                pro_cache_hit: 0,
+                                pro_cache_miss: 0,
+                                pro_response: 0,
+                                total_tokens: today_tokens,
+                                total_cost: 0.0,
+                            };
+                            days.push(today_day);
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(UsageResult {
             models,
-            days: Vec::new(),
+            days,
             month_cost: 0.0,
         })
     }

@@ -12,7 +12,27 @@ DeepSeek Monitor Windows: Windows desktop adaptation of felikschu/deepseek-monit
 
 ## 页面截图
 
+### 旧版本 UI
+
 ![DeepSeek Monitor Windows 页面总览](screenshots/overview.png)
+
+### 新版本 UI
+
+![DeepSeek Monitor Windows 新版本 UI](screenshots/new-ui.png)
+
+## 联系方式
+
+### 微信交流
+
+扫码添加微信（备注 GitHub）：
+
+<img src="screenshots/wechat-qrcode.png" alt="微信二维码" width="240" height="290">
+
+微信号：`pixel-cafetime`
+
+微信公众号：像素与咖啡时光
+
+抖音号：像素与咖啡时光
 
 ## 当前能力
 
@@ -45,6 +65,8 @@ DeepSeek Monitor Windows: Windows desktop adaptation of felikschu/deepseek-monit
 
 ## 安装与开发
 
+Windows 源码开发需要安装 Visual Studio Build Tools 2022，并勾选 `Desktop development with C++`。项目脚本会自动探测本机 VS Build Tools 安装位置，无需手动配置固定路径。
+
 ```powershell
 git clone <your-repo-url>
 cd DeepSeekMonitorWindows
@@ -65,6 +87,8 @@ npm run build
 ```
 
 Tauri 打包目标当前配置为 NSIS 安装包，产物位于 `src-tauri/target/release/bundle/nsis/`。
+
+如果出现 `Visual Studio Build Tools not found`，请安装 Visual Studio Build Tools 2022，并确认已勾选 `Desktop development with C++` 组件。
 
 ## 使用方式
 
